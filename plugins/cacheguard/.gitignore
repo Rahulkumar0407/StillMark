@@ -1,0 +1,6 @@
+# CacheGuard build artifacts and temporary test data
+build/
+.test_data/
+.demo_data/
+.bench_data/
+*.so

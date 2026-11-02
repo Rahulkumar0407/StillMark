@@ -1,0 +1,22 @@
+# Build outputs
+*.so
+build/
+bin/
+
+# Temporary test runtime and databases
+.test_data/
+.demo_data/
+.bench_data/
+*.db
+
+# Local secrets and configs
+config.json
+.env
+*.pem
+*.key
+
+# Editor and OS metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
