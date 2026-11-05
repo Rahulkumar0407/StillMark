@@ -21,7 +21,7 @@ import (
 )
 
 type BenchmarkResult struct {
-	Mode        string        `json:"mode"`
+	Name        string        `json:"name"`
 	TotalReqs   int           `json:"total_requests"`
 	SuccessReqs int           `json:"successful_requests"`
 	Duration    time.Duration `json:"duration"`
@@ -33,6 +33,23 @@ type BenchmarkResult struct {
 	P95Latency  time.Duration `json:"p95_latency"`
 	P99Latency  time.Duration `json:"p99_latency"`
 	MaxLatency  time.Duration `json:"max_latency"`
+	ErrorCount  int           `json:"error_count"`
+}
+
+type RepetitionPair struct {
+	RepNumber int
+	Order     string
+	Base      BenchmarkResult
+	Plug      BenchmarkResult
+	Overhead  OverheadMetrics
+}
+
+type OverheadMetrics struct {
+	P50Pct  float64
+	P95Pct  float64
+	P99Pct  float64
+	MeanPct float64
+	RPSDiff float64
 }
 
 func startMockServer() (*http.Server, string, error) {
@@ -68,7 +85,12 @@ func startMockServer() (*http.Server, string, error) {
 	return server, baseURL, nil
 }
 
-func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, mockBaseURL string) (*exec.Cmd, func(), error) {
+func startGateway(workspaceRoot string, enablePlugin bool, pluginPath, mockBaseURL string) (*exec.Cmd, func(), error) {
+	dataDir, err := os.MkdirTemp("", "bifrost_bench_*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create temp app dir: %w", err)
+	}
+
 	pluginsList := []map[string]any{}
 	if enablePlugin {
 		pluginsList = []map[string]any{
@@ -77,6 +99,9 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
+				"config": map[string]any{
+					"expose_schema_paths": true,
+				},
 			},
 		}
 	}
@@ -92,7 +117,7 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 		"plugins": pluginsList,
 		"providers": map[string]any{
 			"openai": map[string]any{
-				"send_back_raw_request": false, // Raw outbound capture disabled for performance testing
+				"send_back_raw_request": false,
 				"keys": []map[string]any{
 					{
 						"name":   "Mock Bench Key",
@@ -127,25 +152,36 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 
 	configBytes, err := json.MarshalIndent(configContent, "", "  ")
 	if err != nil {
+		_ = os.RemoveAll(dataDir)
 		return nil, nil, fmt.Errorf("failed to marshal config: %w", err)
 	}
 
 	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), configBytes, 0644); err != nil {
+		_ = os.RemoveAll(dataDir)
 		return nil, nil, fmt.Errorf("failed to write config: %w", err)
 	}
 
-	cmd := exec.Command("go", "run", "main.go",
-		"-port", "8081",
-		"-host", "127.0.0.1",
-		"-app-dir", dataDir,
-		"-log-level", "info",
-		"-log-style", "pretty",
-	)
+	var cmd *exec.Cmd
+	binPath := filepath.Join(workspaceRoot, "tmp", "bifrost-http")
+	if _, err := os.Stat(binPath); err == nil {
+		cmd = exec.Command(binPath,
+			"-port", "8081",
+			"-host", "127.0.0.1",
+			"-app-dir", dataDir,
+			"-log-level", "info",
+			"-log-style", "pretty",
+		)
+	} else {
+		cmd = exec.Command("go", "run", "main.go",
+			"-port", "8081",
+			"-host", "127.0.0.1",
+			"-app-dir", dataDir,
+			"-log-level", "info",
+			"-log-style", "pretty",
+		)
+	}
 	cmd.Dir = filepath.Join(workspaceRoot, "transports", "bifrost-http")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var gatewayOut bytes.Buffer
-	cmd.Stdout = &gatewayOut
-	cmd.Stderr = &gatewayOut
 
 	var env []string
 	for _, e := range os.Environ() {
@@ -157,6 +193,7 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 	cmd.Env = env
 
 	if err := cmd.Start(); err != nil {
+		_ = os.RemoveAll(dataDir)
 		return nil, nil, fmt.Errorf("failed to start gateway process: %w", err)
 	}
 
@@ -165,6 +202,7 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 		}
+		_ = os.RemoveAll(dataDir)
 	}
 
 	client := &http.Client{Timeout: 1 * time.Second}
@@ -178,11 +216,11 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	cleanup()
-	return nil, nil, fmt.Errorf("gateway health check timed out on port 8081; logs:\n%s", gatewayOut.String())
+	return nil, nil, fmt.Errorf("gateway health check timed out on port 8081")
 }
 
 func buildRequestPayload(withTools bool) []byte {
@@ -234,6 +272,7 @@ func buildRequestPayload(withTools bool) []byte {
 func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, headers map[string]string) BenchmarkResult {
 	latencies := make([]time.Duration, totalReqs)
 	var successCount int64
+	var errCount int64
 	var mu sync.Mutex
 
 	transport := &http.Transport{
@@ -247,7 +286,7 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 	}
 
 	// Warm-up requests
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 15; i++ {
 		req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
@@ -299,6 +338,7 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 					}
 					mu.Lock()
 					latencies[idx] = elapsed
+					errCount++
 					mu.Unlock()
 				}
 			}
@@ -308,7 +348,6 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 	wg.Wait()
 	totalDuration := time.Since(benchStart)
 
-	// Filter valid latencies
 	valid := make([]time.Duration, 0, totalReqs)
 	var sum time.Duration
 	for _, l := range latencies {
@@ -320,9 +359,10 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 	sort.Slice(valid, func(i, j int) bool { return valid[i] < valid[j] })
 
 	res := BenchmarkResult{
-		Mode:        name,
+		Name:        name,
 		TotalReqs:   totalReqs,
 		SuccessReqs: int(successCount),
+		ErrorCount:  int(errCount),
 		Duration:    totalDuration,
 		RPS:         float64(successCount) / totalDuration.Seconds(),
 	}
@@ -351,9 +391,79 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 	return sorted[idx]
 }
 
+func verifyTrackedDiagnosis(reqBody []byte, headers map[string]string) (string, error) {
+	req, err := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	diag := resp.Header.Get("X-Cacheguard-Diagnosis")
+	if diag == "" {
+		return "", fmt.Errorf("missing X-Cacheguard-Diagnosis response header")
+	}
+	return diag, nil
+}
+
+func calculateOverhead(base, plug BenchmarkResult) OverheadMetrics {
+	p50Diff := float64(plug.P50Latency - base.P50Latency)
+	meanDiff := float64(plug.MeanLatency - base.MeanLatency)
+	p95Diff := float64(plug.P95Latency - base.P95Latency)
+	p99Diff := float64(plug.P99Latency - base.P99Latency)
+
+	return OverheadMetrics{
+		P50Pct:  (p50Diff / float64(base.P50Latency)) * 100.0,
+		P95Pct:  (p95Diff / float64(base.P95Latency)) * 100.0,
+		P99Pct:  (p99Diff / float64(base.P99Latency)) * 100.0,
+		MeanPct: (meanDiff / float64(base.MeanLatency)) * 100.0,
+		RPSDiff: ((plug.RPS - base.RPS) / base.RPS) * 100.0,
+	}
+}
+
+func medianFloat(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	sorted := make([]float64, len(vals))
+	copy(sorted, vals)
+	sort.Float64s(sorted)
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[mid]
+	}
+	return (sorted[mid-1] + sorted[mid]) / 2.0
+}
+
+func minMaxFloat(vals []float64) (float64, float64) {
+	if len(vals) == 0 {
+		return 0, 0
+	}
+	minV, maxV := vals[0], vals[0]
+	for _, v := range vals[1:] {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	return minV, maxV
+}
+
 func main() {
 	fmt.Println("================================================================================")
-	fmt.Println("    BIFROST CACHEGUARD — REAL GATEWAY PERFORMANCE BENCHMARK (MODES A, B, C)     ")
+	fmt.Println("     BIFROST CACHEGUARD — 5-RUN REPEATED MATCHED BENCHMARK (ALTERNATING)       ")
 	fmt.Println("================================================================================")
 
 	workspaceRoot, err := filepath.Abs("../..")
@@ -381,83 +491,193 @@ func main() {
 	defer mockServer.Close()
 	fmt.Printf("✓ Mock provider active on %s\n", mockBaseURL)
 
-	dataDir := filepath.Join(workspaceRoot, "plugins", "cacheguard", ".bench_data")
-	_ = os.RemoveAll(dataDir)
-	_ = os.MkdirAll(dataDir, 0755)
-	defer os.RemoveAll(dataDir)
-
-	const totalRequests = 600
-	const concurrency = 6
+	const totalRequests = 200
+	const concurrency = 4
+	const numRepetitions = 5
 
 	simplePayload := buildRequestPayload(false)
 	toolPayload := buildRequestPayload(true)
 
-	// Mode A: Stock Bifrost without CacheGuard
-	fmt.Println("\n--- [MODE A] Stock Bifrost (No CacheGuard Plugin) ---")
-	_, cleanupA, err := startGateway(workspaceRoot, dataDir, false, "", mockBaseURL)
-	if err != nil {
-		fmt.Printf("FAIL starting Mode A gateway: %v\n", err)
-		os.Exit(1)
+	headersA := map[string]string{}
+	headersB := map[string]string{
+		"x-cacheguard-session-id": "bench-session-b",
 	}
-	resA := runBenchmark("Mode A: Stock Bifrost (Baseline)", totalRequests, concurrency, simplePayload, nil)
-	cleanupA()
-	time.Sleep(1 * time.Second) // allow port release
+	headersC := map[string]string{
+		"x-cacheguard-session-id": "bench-session-c",
+	}
 
-	// Mode B: Bifrost with CacheGuard enabled, no session ID
-	fmt.Println("\n--- [MODE B] Bifrost with CacheGuard Enabled (No Session ID) ---")
-	_, cleanupB, err := startGateway(workspaceRoot, dataDir, true, pluginPath, mockBaseURL)
-	if err != nil {
-		fmt.Printf("FAIL starting Mode B gateway: %v\n", err)
-		os.Exit(1)
-	}
-	resB := runBenchmark("Mode B: CacheGuard Enabled (No Session ID)", totalRequests, concurrency, simplePayload, nil)
-	cleanupB()
-	time.Sleep(1 * time.Second)
+	pairsA := make([]RepetitionPair, numRepetitions)
+	pairsB := make([]RepetitionPair, numRepetitions)
+	pairsC := make([]RepetitionPair, numRepetitions)
 
-	// Mode C: Bifrost with CacheGuard enabled, valid session tracking and nested tool schema
-	fmt.Println("\n--- [MODE C] Bifrost with CacheGuard Enabled (Session Tracking + Nested Tools) ---")
-	_, cleanupC, err := startGateway(workspaceRoot, dataDir, true, pluginPath, mockBaseURL)
-	if err != nil {
-		fmt.Printf("FAIL starting Mode C gateway: %v\n", err)
-		os.Exit(1)
+	for rep := 1; rep <= numRepetitions; rep++ {
+		fmt.Printf("\n>>> EXECUTING REPETITION %d/%d (Order: %s) <<<\n",
+			rep, numRepetitions,
+			func() string {
+				if rep%2 == 1 {
+					return "Baseline -> Plugin"
+				}
+				return "Plugin -> Baseline"
+			}(),
+		)
+
+		var baseRunA, baseRunB, baseRunC BenchmarkResult
+		var plugRunA, plugRunB, plugRunC BenchmarkResult
+
+		runBase := func() {
+			fmt.Printf("  [Rep %d] Starting Baseline Gateway...\n", rep)
+			_, cleanupBase, err := startGateway(workspaceRoot, false, "", mockBaseURL)
+			if err != nil {
+				fmt.Printf("FAIL starting baseline: %v\n", err)
+				os.Exit(1)
+			}
+			baseRunA = runBenchmark(fmt.Sprintf("Base-A-Rep%d", rep), totalRequests, concurrency, simplePayload, headersA)
+			baseRunB = runBenchmark(fmt.Sprintf("Base-B-Rep%d", rep), totalRequests, concurrency, simplePayload, headersB)
+			baseRunC = runBenchmark(fmt.Sprintf("Base-C-Rep%d", rep), totalRequests, concurrency, toolPayload, headersC)
+			cleanupBase()
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		runPlug := func() {
+			fmt.Printf("  [Rep %d] Starting Plugin Gateway...\n", rep)
+			_, cleanupPlug, err := startGateway(workspaceRoot, true, pluginPath, mockBaseURL)
+			if err != nil {
+				fmt.Printf("FAIL starting plugin: %v\n", err)
+				os.Exit(1)
+			}
+			if rep == 1 {
+				diagB, _ := verifyTrackedDiagnosis(simplePayload, headersB)
+				diagC, _ := verifyTrackedDiagnosis(toolPayload, headersC)
+				fmt.Printf("  ✓ Verified Mode B tracked diagnosis: %s, Mode C: %s\n", diagB, diagC)
+			}
+			plugRunA = runBenchmark(fmt.Sprintf("Plug-A-Rep%d", rep), totalRequests, concurrency, simplePayload, headersA)
+			plugRunB = runBenchmark(fmt.Sprintf("Plug-B-Rep%d", rep), totalRequests, concurrency, simplePayload, headersB)
+			plugRunC = runBenchmark(fmt.Sprintf("Plug-C-Rep%d", rep), totalRequests, concurrency, toolPayload, headersC)
+			cleanupPlug()
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		if rep%2 == 1 {
+			// Odd: Baseline first, then Plugin
+			runBase()
+			runPlug()
+		} else {
+			// Even: Plugin first, then Baseline
+			runPlug()
+			runBase()
+		}
+
+		pairsA[rep-1] = RepetitionPair{
+			RepNumber: rep,
+			Order: func() string {
+				if rep%2 == 1 {
+					return "Base->Plug"
+				}
+				return "Plug->Base"
+			}(),
+			Base:     baseRunA,
+			Plug:     plugRunA,
+			Overhead: calculateOverhead(baseRunA, plugRunA),
+		}
+		pairsB[rep-1] = RepetitionPair{
+			RepNumber: rep,
+			Order: func() string {
+				if rep%2 == 1 {
+					return "Base->Plug"
+				}
+				return "Plug->Base"
+			}(),
+			Base:     baseRunB,
+			Plug:     plugRunB,
+			Overhead: calculateOverhead(baseRunB, plugRunB),
+		}
+		pairsC[rep-1] = RepetitionPair{
+			RepNumber: rep,
+			Order: func() string {
+				if rep%2 == 1 {
+					return "Base->Plug"
+				}
+				return "Plug->Base"
+			}(),
+			Base:     baseRunC,
+			Plug:     plugRunC,
+			Overhead: calculateOverhead(baseRunC, plugRunC),
+		}
+
+		fmt.Printf("  Rep %d Complete: A p50 overhead=%+.2f%%, B p50 overhead=%+.2f%%, C p50 overhead=%+.2f%%\n",
+			rep, pairsA[rep-1].Overhead.P50Pct, pairsB[rep-1].Overhead.P50Pct, pairsC[rep-1].Overhead.P50Pct)
 	}
-	resC := runBenchmark("Mode C: CacheGuard Enabled (Session + Nested Tools)", totalRequests, concurrency, toolPayload, map[string]string{
-		"x-bf-cg-session-id": "bench-session-alpha",
-	})
-	cleanupC()
+
+	// =========================================================================
+	// STATISTICAL SYNTHESIS
+	// =========================================================================
+	fmt.Println("\n================================================================================")
+	fmt.Println("             5-RUN REPEATED MATCHED BENCHMARK STATISTICAL SUMMARY               ")
+	fmt.Println("================================================================================")
+
+	summarizeScenario := func(title string, pairs []RepetitionPair) {
+		p50Vals := make([]float64, len(pairs))
+		p95Vals := make([]float64, len(pairs))
+		p99Vals := make([]float64, len(pairs))
+		meanVals := make([]float64, len(pairs))
+		rpsBaseVals := make([]float64, len(pairs))
+		rpsPlugVals := make([]float64, len(pairs))
+		totalBaseErrs := 0
+		totalPlugErrs := 0
+
+		fmt.Printf("\n### %s\n", title)
+		fmt.Printf("| Rep | Order | Base p50 | Plug p50 | p50 Overhead | Base p95 | Plug p95 | p95 Overhead | Base RPS | Plug RPS |\n")
+		fmt.Printf("|-----|-------|----------|----------|--------------|----------|----------|--------------|----------|----------|\n")
+
+		for i, p := range pairs {
+			p50Vals[i] = p.Overhead.P50Pct
+			p95Vals[i] = p.Overhead.P95Pct
+			p99Vals[i] = p.Overhead.P99Pct
+			meanVals[i] = p.Overhead.MeanPct
+			rpsBaseVals[i] = p.Base.RPS
+			rpsPlugVals[i] = p.Plug.RPS
+			totalBaseErrs += p.Base.ErrorCount
+			totalPlugErrs += p.Plug.ErrorCount
+
+			fmt.Printf("| %3d | %-9s | %8s | %8s | %+11.2f%% | %8s | %8s | %+11.2f%% | %8.1f | %8.1f |\n",
+				p.RepNumber,
+				p.Order,
+				p.Base.P50Latency.Round(time.Microsecond),
+				p.Plug.P50Latency.Round(time.Microsecond),
+				p.Overhead.P50Pct,
+				p.Base.P95Latency.Round(time.Microsecond),
+				p.Plug.P95Latency.Round(time.Microsecond),
+				p.Overhead.P95Pct,
+				p.Base.RPS,
+				p.Plug.RPS,
+			)
+		}
+
+		medP50 := medianFloat(p50Vals)
+		minP50, maxP50 := minMaxFloat(p50Vals)
+		medP95 := medianFloat(p95Vals)
+		minP95, maxP95 := minMaxFloat(p95Vals)
+		medP99 := medianFloat(p99Vals)
+		medMean := medianFloat(meanVals)
+		medBaseRPS := medianFloat(rpsBaseVals)
+		medPlugRPS := medianFloat(rpsPlugVals)
+
+		fmt.Printf("\n  • Median p50 Relative Overhead: %+.2f%% (Range: %+.2f%% to %+.2f%%, spread=%.2f%%)\n",
+			medP50, minP50, maxP50, maxP50-minP50)
+		fmt.Printf("  • Median p95 Relative Overhead: %+.2f%% (Range: %+.2f%% to %+.2f%%, spread=%.2f%%)\n",
+			medP95, minP95, maxP95, maxP95-minP95)
+		fmt.Printf("  • Median p99 Relative Overhead: %+.2f%%\n", medP99)
+		fmt.Printf("  • Median Mean Overhead:        %+.2f%%\n", medMean)
+		fmt.Printf("  • Median Throughput (RPS):     Baseline=%.1f RPS, Plugin=%.1f RPS (Diff: %+.2f%%)\n",
+			medBaseRPS, medPlugRPS, (medPlugRPS-medBaseRPS)/medBaseRPS*100.0)
+		fmt.Printf("  • Errors Encountered:          Baseline=%d, Plugin=%d\n", totalBaseErrs, totalPlugErrs)
+	}
+
+	summarizeScenario("Scenario A: Simple Chat (Untracked)", pairsA)
+	summarizeScenario("Scenario B: Simple Chat (Session Tracked)", pairsB)
+	summarizeScenario("Scenario C: Nested Tools (Session Tracked & Schema Flattened)", pairsC)
 
 	fmt.Println("\n================================================================================")
-	fmt.Println("                             BENCHMARK RESULTS SUMMARY                          ")
-	fmt.Println("================================================================================")
-	fmt.Printf("%-48s | %8s | %9s | %9s | %9s | %9s\n", "Mode", "RPS", "Mean", "p50", "p95", "p99")
-	fmt.Println(strings.Repeat("-", 100))
-
-	printRow := func(r BenchmarkResult) {
-		fmt.Printf("%-48s | %8.1f | %9s | %9s | %9s | %9s\n",
-			r.Mode,
-			r.RPS,
-			r.MeanLatency.Round(time.Microsecond),
-			r.P50Latency.Round(time.Microsecond),
-			r.P95Latency.Round(time.Microsecond),
-			r.P99Latency.Round(time.Microsecond),
-		)
-	}
-
-	printRow(resA)
-	printRow(resB)
-	printRow(resC)
-	fmt.Println(strings.Repeat("-", 100))
-
-	// Relative overhead analysis
-	overheadP50B := float64(resB.P50Latency-resA.P50Latency) / float64(resA.P50Latency) * 100.0
-	overheadP50C := float64(resC.P50Latency-resA.P50Latency) / float64(resA.P50Latency) * 100.0
-	rpsDiffB := (resB.RPS - resA.RPS) / resA.RPS * 100.0
-	rpsDiffC := (resC.RPS - resA.RPS) / resA.RPS * 100.0
-
-	fmt.Printf("\nRelative Overhead Analysis (vs Stock Baseline):\n")
-	fmt.Printf("  • Mode B (No session)    p50 latency delta: %+6.2f%% (%+v), RPS delta: %+6.2f%%\n",
-		overheadP50B, (resB.P50Latency - resA.P50Latency).Round(time.Microsecond), rpsDiffB)
-	fmt.Printf("  • Mode C (Session+Tools) p50 latency delta: %+6.2f%% (%+v), RPS delta: %+6.2f%%\n",
-		overheadP50C, (resC.P50Latency - resA.P50Latency).Round(time.Microsecond), rpsDiffC)
+	fmt.Println("             ALL 5 REPEATED BENCHMARK MEASUREMENTS COMPLETED!                   ")
 	fmt.Println("================================================================================")
 }

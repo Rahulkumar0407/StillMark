@@ -185,6 +185,9 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
+				"config": map[string]any{
+					"expose_schema_paths": true,
+				},
 			},
 		}
 	}
@@ -209,7 +212,8 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 					},
 				},
 				"network_config": map[string]any{
-					"base_url": mockBaseURL,
+					"base_url":              mockBaseURL,
+					"allow_private_network": true,
 				},
 			},
 			"anthropic": map[string]any{
@@ -225,7 +229,8 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 					},
 				},
 				"network_config": map[string]any{
-					"base_url": mockBaseURL,
+					"base_url":              mockBaseURL,
+					"allow_private_network": true,
 				},
 			},
 		},
@@ -264,14 +269,26 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 		return nil, nil, fmt.Errorf("failed to write config: %w", err)
 	}
 
-	cmd := exec.Command("go", "run", "main.go",
-		"-port", "8081",
-		"-host", "127.0.0.1",
-		"-app-dir", dataDir,
-		"-log-level", "info",
-		"-log-style", "pretty",
-	)
-	cmd.Dir = filepath.Join(workspaceRoot, "transports", "bifrost-http")
+	bifrostBin := filepath.Join(workspaceRoot, "tmp", "bifrost-http")
+	var cmd *exec.Cmd
+	if _, err := os.Stat(bifrostBin); err == nil {
+		cmd = exec.Command(bifrostBin,
+			"-port", "8081",
+			"-host", "127.0.0.1",
+			"-app-dir", dataDir,
+			"-log-level", "info",
+			"-log-style", "pretty",
+		)
+	} else {
+		cmd = exec.Command("go", "run", "main.go",
+			"-port", "8081",
+			"-host", "127.0.0.1",
+			"-app-dir", dataDir,
+			"-log-level", "info",
+			"-log-style", "pretty",
+		)
+		cmd.Dir = filepath.Join(workspaceRoot, "transports", "bifrost-http")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var env []string
@@ -487,9 +504,9 @@ func main() {
 	}
 
 	fmt.Println("  [Turn 1] Client sends baseline request with node_id type:string")
-	statusA1, hdrA1, _, err := sendRequest(httpClient, buildSampleRequest("gpt-4o", "string"), sessionHeadersA)
+	statusA1, hdrA1, bodyA1, err := sendRequest(httpClient, buildSampleRequest("gpt-4o", "string"), sessionHeadersA)
 	if err != nil || statusA1 != http.StatusOK {
-		fmt.Printf("FAIL: Turn A1 failed (status: %d, err: %v)\n", statusA1, err)
+		fmt.Printf("FAIL: Turn A1 failed (status: %d, err: %v, body: %+v)\n", statusA1, err, bodyA1)
 		os.Exit(1)
 	}
 	diagA1 := hdrA1.Get("X-Cacheguard-Diagnosis")
@@ -579,10 +596,12 @@ func main() {
 	diagC2 := hdrC2.Get("X-Cacheguard-Diagnosis")
 	attrC2 := hdrC2.Get("X-Cacheguard-Attribution")
 	driftCompC2 := hdrC2.Get("X-Cacheguard-Drift-Component")
+	cachedToksC2 := hdrC2.Get("X-Cacheguard-Cached-Tokens")
 
-	fmt.Printf("    • Turn 2 Diagnosis:   %s (Expected: stable_hit)\n", diagC2)
-	fmt.Printf("    • Turn 2 Attribution: %s (Expected: none)\n", attrC2)
-	fmt.Printf("    • Drift Detected:     %t (Drift component header: %q)\n", driftCompC2 != "", driftCompC2)
+	fmt.Printf("    • Turn 2 Diagnosis:     %s (Expected: stable_hit)\n", diagC2)
+	fmt.Printf("    • Turn 2 Attribution:   %s (Expected: none)\n", attrC2)
+	fmt.Printf("    • Turn 2 Cached Tokens: %s (Expected: 400)\n", cachedToksC2)
+	fmt.Printf("    • Drift Detected:       %t (Drift component header: %q)\n", driftCompC2 != "", driftCompC2)
 
 	testCOk := (diagC2 == "stable_hit" && attrC2 == "none" && driftCompC2 == "")
 	if testCOk {
@@ -662,11 +681,11 @@ func main() {
 
 	fmt.Printf("    • Turn 2 Diagnosis:      %s (Expected: initial_request — separate cache history)\n", diagE2)
 	fmt.Printf("    • Domain Switch Flagged: %s (Expected: true)\n", domainChangedE2)
-	fmt.Printf("    • Previous Domain:       %s (Expected: openai|gpt-4o)\n", prevDomainE2)
+	fmt.Printf("    • Previous Domain:       %q (Expected: empty/omitted for privacy)\n", prevDomainE2)
 
-	testEOk := (diagE2 == "initial_request" && domainChangedE2 == "true" && prevDomainE2 == "openai|gpt-4o")
+	testEOk := (diagE2 == "initial_request" && domainChangedE2 == "true" && prevDomainE2 == "")
 	if testEOk {
-		fmt.Println(">>> TEST E RESULT: PASS (Provider/model change isolated; cache histories never cross-compared)")
+		fmt.Println(">>> TEST E RESULT: PASS (Provider/model change isolated; cache histories never cross-compared; domain privacy preserved)")
 	} else {
 		fmt.Printf(">>> TEST E RESULT: FAIL (diag=%s, domainChanged=%s, prevDomain=%s)\n", diagE2, domainChangedE2, prevDomainE2)
 		os.Exit(1)

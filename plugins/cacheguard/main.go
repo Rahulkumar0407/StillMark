@@ -19,27 +19,29 @@ const (
 // RequestDiagnostic holds non-sensitive metadata for the current request.
 // NEVER stores raw prompts, message contents, or authorization headers.
 type RequestDiagnostic struct {
-	SessionID         string                `json:"session_id,omitempty"`
-	CompositeKey      string                `json:"-"`
-	TrustedTenant     bool                  `json:"trusted_tenant"`
-	TenantID          string                `json:"tenant_id,omitempty"`
-	Model             string                `json:"model"`
-	Provider          string                `json:"provider"`
-	ToolCount         int                   `json:"tool_count"`
-	HasSystemPrompt   bool                  `json:"has_system_prompt"`
-	Drift             DriftResult           `json:"drift"`
-	Diagnosis         DiagnosisCategory     `json:"diagnosis"`
-	Attribution       AttributionType       `json:"attribution"`
-	DomainChanged     bool                  `json:"domain_changed"`
-	PreviousDomain    string                `json:"previous_domain,omitempty"`
-	HasUsage          bool                  `json:"has_usage"`
-	PromptTokens      int                   `json:"prompt_tokens"`
-	CachedReadTokens  int                   `json:"cached_read_tokens"`
-	CachedWriteTokens int                   `json:"cached_write_tokens"`
-	Transformation    TransformationFinding `json:"transformation"`
-	Findings          []DiagnosticFinding   `json:"findings,omitempty"`
-	PrimaryFinding    *DiagnosticFinding    `json:"primary_finding,omitempty"`
-	Snapshot          RequestSnapshot       `json:"-"`
+	SessionID          string                `json:"session_id,omitempty"`
+	CompositeKey       string                `json:"-"`
+	TrustedTenant      bool                  `json:"trusted_tenant"`
+	TenantID           string                `json:"tenant_id,omitempty"`
+	Model              string                `json:"model"`
+	Provider           string                `json:"provider"`
+	ToolCount          int                   `json:"tool_count"`
+	HasSystemPrompt    bool                  `json:"has_system_prompt"`
+	Drift              DriftResult           `json:"drift"`
+	Diagnosis          DiagnosisCategory     `json:"diagnosis"`
+	Attribution        AttributionType       `json:"attribution"`
+	DomainChanged      bool                  `json:"domain_changed"`
+	PreviousDomain     string                `json:"previous_domain,omitempty"`
+	HasUsage           bool                  `json:"has_usage"`
+	HasPromptDetails   bool                  `json:"has_prompt_details"`
+	StructurallyStable bool                  `json:"structurally_stable"`
+	PromptTokens       int                   `json:"prompt_tokens"`
+	CachedReadTokens   int                   `json:"cached_read_tokens"`
+	CachedWriteTokens  int                   `json:"cached_write_tokens"`
+	Transformation     TransformationFinding `json:"transformation"`
+	Findings           []DiagnosticFinding   `json:"findings,omitempty"`
+	PrimaryFinding     *DiagnosticFinding    `json:"primary_finding,omitempty"`
+	Snapshot           RequestSnapshot       `json:"-"`
 }
 
 var (
@@ -105,6 +107,15 @@ func Cleanup() error {
 
 	CleanupEngine()
 	return nil
+}
+
+func getHTTPHeader(headers map[string]string, key string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
 }
 
 // HTTPTransportPreHook extracts and validates the opt-in session ID header.
@@ -196,9 +207,12 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (outRe
 		// 2. Process Tools and nested schemas safely with canonical path flattening
 		if req.ChatRequest.Params != nil && len(req.ChatRequest.Params.Tools) > 0 {
 			diag.ToolCount = len(req.ChatRequest.Params.Tools)
-			toolsHMAC, pathHMACs := FlattenToolSchemas(req.ChatRequest.Params.Tools)
+			toolsHMAC, pathHMACs, incomplete := FlattenToolSchemasWithStatus(req.ChatRequest.Params.Tools)
 			diag.Snapshot.ToolsHMAC = toolsHMAC
 			diag.Snapshot.PathHMACs = pathHMACs
+			if incomplete {
+				diag.Snapshot.ComparisonIncomplete = true
+			}
 		}
 
 		// 3. Count client-supplied cache markers
@@ -257,8 +271,12 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (outRe
 					diag.Attribution = drift.Attribution
 					if drift.Detected {
 						diag.Diagnosis = DiagnosisConfirmedDrift
+					} else if drift.Attribution == AttributionOriginUnverified && strings.Contains(drift.Reason, "comparison incomplete") {
+						diag.StructurallyStable = false
+						diag.Diagnosis = DiagnosisUntracked
 					} else {
-						diag.Diagnosis = DiagnosisStableMiss
+						diag.StructurallyStable = true
+						diag.Diagnosis = DiagnosisStructurallyStable
 					}
 				} else {
 					diag.Diagnosis = DiagnosisInitialRequest
@@ -333,6 +351,19 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 		}
 	}
 
+	isStreaming := false
+	isStreamEnd := false
+	if ctx != nil {
+		if ctx.Value(schemas.BifrostContextKeyStreamAccumulatedUsage) != nil {
+			isStreaming = true
+		}
+		if endVal := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator); endVal != nil {
+			if end, ok := endVal.(bool); ok && end {
+				isStreamEnd = true
+			}
+		}
+	}
+
 	// 4. Extract and normalize provider usage metrics
 	if resp != nil && resp.ChatResponse != nil && resp.ChatResponse.Usage != nil {
 		usage := resp.ChatResponse.Usage
@@ -342,43 +373,68 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 		if usage.PromptTokensDetails != nil {
 			diag.CachedReadTokens = usage.PromptTokensDetails.CachedReadTokens
 			diag.CachedWriteTokens = usage.PromptTokensDetails.CachedWriteTokens
+
+			// If provider only supplied non-cache details (e.g. AudioTokens > 0 or ImageTokens > 0)
+			// with zero cached read/write tokens, the provider never supplied a cached-token metric.
+			// Do not equate absent with explicit zero.
+			hasExplicitCacheMetric := (diag.CachedReadTokens > 0 || diag.CachedWriteTokens > 0 || usage.PromptTokensDetails.CachedWriteTokenDetails != nil)
+			if !hasExplicitCacheMetric && (usage.PromptTokensDetails.AudioTokens > 0 || usage.PromptTokensDetails.ImageTokens > 0) {
+				diag.HasPromptDetails = false
+			} else {
+				diag.HasPromptDetails = true
+			}
 		}
 
 		// Finalize diagnosis if structural comparison was stable
-		if diag.Diagnosis != DiagnosisConfirmedDrift && diag.Diagnosis != DiagnosisRefused && diag.Diagnosis != DiagnosisUntracked {
-			if diag.Diagnosis != DiagnosisInitialRequest {
+		if diag.StructurallyStable {
+			if diag.HasPromptDetails {
 				if diag.CachedReadTokens > 0 {
 					diag.Diagnosis = DiagnosisStableHit
 				} else {
 					diag.Diagnosis = DiagnosisStableMiss
 				}
+			} else {
+				// Provider usage reported, but prompt cache details are absent
+				diag.Diagnosis = DiagnosisUsageUnavailable
+			}
+		}
+	} else if bifrostErr != nil {
+		// Provider returned an error: do not label failed requests as cache miss
+		if diag.StructurallyStable || diag.Diagnosis == DiagnosisStableMiss {
+			diag.Diagnosis = DiagnosisUntracked
+		}
+	} else if !diag.HasUsage && (!isStreaming || isStreamEnd) {
+		// Usage metadata is absent on complete response: do not falsely label as stable_miss
+		if diag.StructurallyStable || diag.Diagnosis == DiagnosisStableMiss {
+			diag.Diagnosis = DiagnosisUsageUnavailable
+		}
+	}
+
+	// 5. Build human-readable diagnostic findings upon turn completion or usage arrival
+	if !isStreaming || isStreamEnd || diag.HasUsage {
+		diag.Findings = BuildDiagnosticFindings(diag)
+		if len(diag.Findings) > 0 {
+			var primary *DiagnosticFinding
+			for i := range diag.Findings {
+				f := &diag.Findings[i]
+				if primary == nil || (f.Severity == SeverityWarning && primary.Severity == SeverityInfo) || (f.Severity == SeverityError && primary.Severity != SeverityError) {
+					primary = f
+				}
+			}
+			diag.PrimaryFinding = primary
+
+			activeConfigMu.RLock()
+			cfg := activeConfig
+			activeConfigMu.RUnlock()
+
+			if cfg.DiagnosticLogging {
+				emitPrivacySafeLogs(ctx, diag, cfg)
 			}
 		}
 	}
 
-	// 5. Build human-readable diagnostic findings
-	diag.Findings = BuildDiagnosticFindings(diag)
-	if len(diag.Findings) > 0 {
-		var primary *DiagnosticFinding
-		for i := range diag.Findings {
-			f := &diag.Findings[i]
-			if primary == nil || (f.Severity == SeverityWarning && primary.Severity == SeverityInfo) || (f.Severity == SeverityError && primary.Severity != SeverityError) {
-				primary = f
-			}
-		}
-		diag.PrimaryFinding = primary
-
-		activeConfigMu.RLock()
-		cfg := activeConfig
-		activeConfigMu.RUnlock()
-
-		if cfg.DiagnosticLogging {
-			emitPrivacySafeLogs(ctx, diag, cfg)
-		}
-	}
-
-	// 6. Record snapshot into session tracker upon successful turn
-	if diag.CompositeKey != "" && diag.TrustedTenant {
+	// 6. Record snapshot into session tracker upon successful turn only (at stream end for streaming, or for complete unary responses)
+	if bifrostErr == nil && resp != nil && diag.CompositeKey != "" && diag.TrustedTenant && (!isStreaming || isStreamEnd) {
 		globalTrackerMu.RLock()
 		tracker := globalTracker
 		globalTrackerMu.RUnlock()
@@ -416,33 +472,35 @@ func HTTPTransportResponseHeadersHook(ctx *schemas.BifrostContext, req *schemas.
 
 					if diag.DomainChanged {
 						resp.SetHeader("X-Cacheguard-Domain-Changed", "true")
-						if diag.PreviousDomain != "" {
-							resp.SetHeader("X-Cacheguard-Previous-Domain", diag.PreviousDomain)
-						}
+						// Privacy: Omit X-Cacheguard-Previous-Domain to prevent leaking provider/model information
 					}
+
+					activeConfigMu.RLock()
+					exposePaths := activeConfig.ExposeSchemaPaths
+					activeConfigMu.RUnlock()
 
 					if diag.Drift.Detected {
 						resp.SetHeader("X-Cacheguard-Drift-Component", diag.Drift.Component)
-						if diag.Drift.Path != "" {
-							resp.SetHeader("X-Cacheguard-Drift-Path", diag.Drift.Path)
+						if diag.Drift.Path != "" && exposePaths {
+							resp.SetHeader("X-Cacheguard-Drift-Path", SanitizeFieldPath(diag.Drift.Path))
 						}
 						resp.SetHeader("X-Cacheguard-Drift-Type", diag.Drift.ChangeType)
-						if diag.Drift.Reason != "" {
-							resp.SetHeader("X-Cacheguard-Drift-Reason", diag.Drift.Reason)
-						}
+						// Privacy: Omit raw client-derived drift reason strings from response headers
 					}
 
 					if diag.HasUsage {
 						resp.SetHeader("X-Cacheguard-Prompt-Tokens", fmt.Sprintf("%d", diag.PromptTokens))
-						resp.SetHeader("X-Cacheguard-Cached-Tokens", fmt.Sprintf("%d", diag.CachedReadTokens))
+						if diag.HasPromptDetails {
+							resp.SetHeader("X-Cacheguard-Cached-Tokens", fmt.Sprintf("%d", diag.CachedReadTokens))
+						}
 					}
 
 					if diag.Transformation.Type != TransformationNone {
 						resp.SetHeader("X-Cacheguard-Transformation", string(diag.Transformation.Type))
 						resp.SetHeader("X-Cacheguard-Client-Markers", fmt.Sprintf("%d", diag.Transformation.ClientMarkers))
 						resp.SetHeader("X-Cacheguard-Outbound-Markers", fmt.Sprintf("%d", diag.Transformation.OutboundMarkers))
-						if diag.Transformation.Path != "" {
-							resp.SetHeader("X-Cacheguard-Injected-Path", diag.Transformation.Path)
+						if diag.Transformation.Path != "" && exposePaths {
+							resp.SetHeader("X-Cacheguard-Injected-Path", SanitizeFieldPath(diag.Transformation.Path))
 						}
 						if diag.Transformation.WarrantsReview {
 							resp.SetHeader("X-Cacheguard-Review-Recommended", "true")

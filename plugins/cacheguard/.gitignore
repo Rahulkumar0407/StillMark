@@ -3,4 +3,5 @@ build/
 .test_data/
 .demo_data/
 .bench_data/
+.installer_test_env/
 *.so

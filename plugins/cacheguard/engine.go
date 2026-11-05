@@ -126,6 +126,7 @@ type PluginConfig struct {
 	MaxEntriesPerSession  int    `json:"max_entries_per_session"` // default: 10
 	SessionTTL            string `json:"session_ttl"`             // duration string e.g. "30m" (default: "30m")
 	RawOutboundInspection bool   `json:"raw_outbound_inspection"` // default: false (DIAGNOSTIC-ONLY)
+	ExposeSchemaPaths     bool   `json:"expose_schema_paths"`     // default: false (opt-in to expose detailed schema paths in client response headers)
 }
 
 func DefaultPluginConfig() PluginConfig {
@@ -137,6 +138,7 @@ func DefaultPluginConfig() PluginConfig {
 		MaxEntriesPerSession:  DefaultMaxEntries,
 		SessionTTL:            "30m",
 		RawOutboundInspection: false,
+		ExposeSchemaPaths:     false,
 	}
 }
 
@@ -153,15 +155,37 @@ var (
 	globalDomainTracker   *SessionDomainTracker
 )
 
-// SessionDomainTracker tracks the provider and model used in a session to identify
-// expected provider or model switches across requests.
-type SessionDomainTracker struct {
-	mu      sync.RWMutex
-	domains map[string]string // tenantID|sessionID -> "provider|model"
+type domainEntry struct {
+	val        string
+	lastActive time.Time
 }
 
-func NewSessionDomainTracker() *SessionDomainTracker {
-	return &SessionDomainTracker{domains: make(map[string]string)}
+// SessionDomainTracker tracks the provider and model used in a session to identify
+// expected provider or model switches across requests.
+// Implements bounded size and TTL-based eviction consistent with SessionTracker.
+type SessionDomainTracker struct {
+	mu          sync.Mutex
+	maxSessions int
+	ttl         time.Duration
+	domains     map[string]domainEntry // tenantID|sessionID -> {val: "provider|model", lastActive}
+}
+
+func NewSessionDomainTracker(maxSessions int, ttl time.Duration) *SessionDomainTracker {
+	if maxSessions <= 0 {
+		maxSessions = DefaultMaxSessions
+	} else if maxSessions > 100000 {
+		maxSessions = 100000
+	} else if maxSessions < 10 {
+		maxSessions = 10
+	}
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	return &SessionDomainTracker{
+		maxSessions: maxSessions,
+		ttl:         ttl,
+		domains:     make(map[string]domainEntry),
+	}
 }
 
 func (s *SessionDomainTracker) CheckAndRecord(tenantID, sessionID, provider, model string) (bool, string) {
@@ -170,19 +194,43 @@ func (s *SessionDomainTracker) CheckAndRecord(tenantID, sessionID, provider, mod
 	}
 	key := tenantID + "|" + sessionID
 	val := provider + "|" + model
+	now := time.Now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	prev, exists := s.domains[key]
-	s.domains[key] = val
+	existing, exists := s.domains[key]
+	if exists {
+		if now.Sub(existing.lastActive) > s.ttl {
+			delete(s.domains, key)
+			exists = false
+		}
+	}
+
 	if !exists {
+		// Evict oldest if reaching capacity
+		if len(s.domains) >= s.maxSessions {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, v := range s.domains {
+				if oldestKey == "" || v.lastActive.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = v.lastActive
+				}
+			}
+			if oldestKey != "" {
+				delete(s.domains, oldestKey)
+			}
+		}
+		s.domains[key] = domainEntry{val: val, lastActive: now}
 		return false, ""
 	}
-	if prev != val {
-		return true, prev
+
+	s.domains[key] = domainEntry{val: val, lastActive: now}
+	if existing.val != val {
+		return true, existing.val
 	}
-	return false, prev
+	return false, existing.val
 }
 
 func (s *SessionDomainTracker) Clear() {
@@ -191,7 +239,16 @@ func (s *SessionDomainTracker) Clear() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.domains = make(map[string]string)
+	s.domains = make(map[string]domainEntry)
+}
+
+func (s *SessionDomainTracker) Count() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.domains)
 }
 
 // InitEngine initializes process-local cryptographic key, session tracker, and domain tracker.
@@ -209,7 +266,7 @@ func InitEngine(maxSessions, maxEntries int, ttl time.Duration) error {
 	globalTrackerMu.Unlock()
 
 	globalDomainTrackerMu.Lock()
-	globalDomainTracker = NewSessionDomainTracker()
+	globalDomainTracker = NewSessionDomainTracker(maxSessions, ttl)
 	globalDomainTrackerMu.Unlock()
 
 	return nil
@@ -243,16 +300,17 @@ func CleanupEngine() {
 
 // computeHMAC generates domain-separated keyed hashes using the process-local secret.
 // This prevents offline rainbow-table precomputation on short, predictable prompts.
+// Thread-safe: holds read lock during HMAC initialization and calculation to prevent
+// race conditions with CleanupEngine.
 func computeHMAC(domain string, data []byte) string {
 	processKeyMu.RLock()
-	k := processKey
-	processKeyMu.RUnlock()
+	defer processKeyMu.RUnlock()
 
-	if len(k) == 0 || len(data) == 0 {
+	if len(processKey) == 0 || len(data) == 0 {
 		return ""
 	}
 
-	mac := hmac.New(sha256.New, k)
+	mac := hmac.New(sha256.New, processKey)
 	mac.Write([]byte(domain))
 	mac.Write(data)
 	return hex.EncodeToString(mac.Sum(nil))
@@ -291,6 +349,7 @@ type RequestSnapshot struct {
 	ToolCount              int
 	ClientCacheMarkerCount int
 	ClientMarkerPaths      []string
+	ComparisonIncomplete   bool // Indicates schema recursion, path count, or leaf bounds were reached
 
 	// Stage B: Outbound Provider-Bound Request (observed in PostLLMHook via RawRequest when enabled)
 	OutboundObservable       bool
@@ -310,23 +369,45 @@ const (
 
 // ExtractPrefixSnapshot deterministically captures the static prefix that is cache-eligible.
 // In multi-turn chat conversations, later turns (messages[1], messages[2], ...) are appended.
-// 1. If an explicit System or Developer message exists, it is the primary prefix.
-// 2. If an explicit cache_control marker is present on any message, that message is part of the prefix.
-// 3. Otherwise, the initial turn messages[0] serves as the baseline prefix.
-// Appending new user/assistant turns to a conversation preserves the prefix and is NOT flagged as drift.
+// 1. If explicit System or Developer message(s) exist, all of them are captured in order as the primary prefix.
+// 2. Supports multimodal content blocks (text, image, audio metadata).
+// 3. If an explicit cache_control marker is present on any message, that message is part of the prefix.
+// 4. Otherwise, the initial turn messages[0] serves as the baseline prefix.
 func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 	if chatReq == nil || len(chatReq.Input) == 0 {
 		return "", false
 	}
 
-	// 1. Check for explicit system/developer instruction
+	// 1. Check for explicit system/developer instruction(s) - capture ALL of them in order
+	var sysBuf bytes.Buffer
+	hasSys := false
 	for _, msg := range chatReq.Input {
 		if msg.Role == schemas.ChatMessageRoleSystem || msg.Role == schemas.ChatMessageRoleDeveloper {
-			if msg.Content != nil && msg.Content.ContentStr != nil {
-				return computeHMAC(domainPrefixPrompt, []byte(*msg.Content.ContentStr)), true
+			hasSys = true
+			sysBuf.WriteString(string(msg.Role))
+			sysBuf.WriteString(":")
+			if msg.Content != nil {
+				if msg.Content.ContentStr != nil {
+					sysBuf.WriteString(*msg.Content.ContentStr)
+				}
+				for _, block := range msg.Content.ContentBlocks {
+					if block.Type != "" {
+						sysBuf.WriteString(string(block.Type))
+						sysBuf.WriteString(":")
+					}
+					if block.Text != nil {
+						sysBuf.WriteString(*block.Text)
+					}
+					if block.ImageURLStruct != nil {
+						sysBuf.WriteString(block.ImageURLStruct.URL)
+					}
+				}
 			}
-			break
+			sysBuf.WriteString(";")
 		}
+	}
+	if hasSys {
+		return computeHMAC(domainPrefixPrompt, sysBuf.Bytes()), true
 	}
 
 	// 2. Check for message with explicit cache-control marker
@@ -334,8 +415,15 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 		if msg.Content != nil {
 			for _, block := range msg.Content.ContentBlocks {
 				if block.CacheControl != nil || block.PromptCacheBreakpoint != nil || block.CachePoint != nil {
+					var b bytes.Buffer
 					if block.Text != nil {
-						return computeHMAC(domainPrefixPrompt, []byte(*block.Text)), true
+						b.WriteString(*block.Text)
+					}
+					if block.ImageURLStruct != nil {
+						b.WriteString(block.ImageURLStruct.URL)
+					}
+					if b.Len() > 0 {
+						return computeHMAC(domainPrefixPrompt, b.Bytes()), true
 					}
 				}
 			}
@@ -344,8 +432,24 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 
 	// 3. Baseline first message (e.g. initial prompt in conversations without system prompt)
 	first := chatReq.Input[0]
-	if first.Content != nil && first.Content.ContentStr != nil {
-		return computeHMAC(domainPrefixPrompt, []byte(*first.Content.ContentStr)), false
+	if first.Content != nil {
+		if first.Content.ContentStr != nil {
+			return computeHMAC(domainPrefixPrompt, []byte(*first.Content.ContentStr)), false
+		}
+		if len(first.Content.ContentBlocks) > 0 {
+			var b bytes.Buffer
+			for _, block := range first.Content.ContentBlocks {
+				if block.Text != nil {
+					b.WriteString(*block.Text)
+				}
+				if block.ImageURLStruct != nil {
+					b.WriteString(block.ImageURLStruct.URL)
+				}
+			}
+			if b.Len() > 0 {
+				return computeHMAC(domainPrefixPrompt, b.Bytes()), false
+			}
+		}
 	}
 
 	return "", false
@@ -355,13 +459,22 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 // keyed leaf HMACs without storing the raw schema values.
 // Enforces maxSchemaRecursionDepth and maxFlattenedPaths to prevent CPU/memory exhaustion.
 func FlattenToolSchemas(tools []schemas.ChatTool) (string, map[string]string) {
+	hmac, paths, _ := FlattenToolSchemasWithStatus(tools)
+	return hmac, paths
+}
+
+// FlattenToolSchemasWithStatus extracts JSON schema paths and computes keyed leaf HMACs,
+// tracking whether any content or depth limits were reached (incomplete=true).
+func FlattenToolSchemasWithStatus(tools []schemas.ChatTool) (string, map[string]string, bool) {
 	pathHMACs := make(map[string]string)
 	if len(tools) == 0 {
-		return "", pathHMACs
+		return "", pathHMACs, false
 	}
 
+	var incomplete bool
 	for i, tool := range tools {
 		if len(pathHMACs) >= maxFlattenedPaths {
+			incomplete = true
 			break
 		}
 		basePath := fmt.Sprintf("tools[%d]", i)
@@ -376,6 +489,7 @@ func FlattenToolSchemas(tools []schemas.ChatTool) (string, map[string]string) {
 				desc := *tool.Function.Description
 				if len(desc) > maxLeafValueLength {
 					desc = desc[:maxLeafValueLength]
+					incomplete = true
 				}
 				pathHMACs[descPath] = computeHMAC(domainPrefixTool, []byte(desc))
 			}
@@ -384,7 +498,9 @@ func FlattenToolSchemas(tools []schemas.ChatTool) (string, map[string]string) {
 				if paramBytes, err := json.Marshal(tool.Function.Parameters); err == nil {
 					var rawMap map[string]any
 					if err := json.Unmarshal(paramBytes, &rawMap); err == nil {
-						flattenJSONMap(funcPath+".parameters", rawMap, pathHMACs, 0)
+						if inc := flattenJSONMap(funcPath+".parameters", rawMap, pathHMACs, 0); inc {
+							incomplete = true
+						}
 					}
 				}
 			}
@@ -407,12 +523,16 @@ func FlattenToolSchemas(tools []schemas.ChatTool) (string, map[string]string) {
 	}
 
 	overallHMAC := computeHMAC(domainPrefixTool, []byte(combined.String()))
-	return overallHMAC, pathHMACs
+	return overallHMAC, pathHMACs, incomplete
 }
 
-func flattenJSONMap(prefix string, m map[string]any, dest map[string]string, depth int) {
-	if depth >= maxSchemaRecursionDepth || len(dest) >= maxFlattenedPaths {
-		return
+func flattenJSONMap(prefix string, m map[string]any, dest map[string]string, depth int) bool {
+	var incomplete bool
+	if depth >= maxSchemaRecursionDepth {
+		return true
+	}
+	if len(dest) >= maxFlattenedPaths {
+		return true
 	}
 	var keys []string
 	for k := range m {
@@ -422,47 +542,65 @@ func flattenJSONMap(prefix string, m map[string]any, dest map[string]string, dep
 
 	for _, k := range keys {
 		if len(dest) >= maxFlattenedPaths {
-			return
+			incomplete = true
+			break
 		}
 		path := prefix + "." + k
 		val := m[k]
 		switch v := val.(type) {
 		case map[string]any:
-			flattenJSONMap(path, v, dest, depth+1)
+			if flattenJSONMap(path, v, dest, depth+1) {
+				incomplete = true
+			}
 		case []any:
-			flattenJSONArray(path, v, dest, depth+1)
+			if flattenJSONArray(path, v, dest, depth+1) {
+				incomplete = true
+			}
 		default:
 			valStr := fmt.Sprintf("%v", v)
 			if len(valStr) > maxLeafValueLength {
 				valStr = valStr[:maxLeafValueLength]
+				incomplete = true
 			}
 			dest[path] = computeHMAC(domainPrefixSchemaPath, []byte(valStr))
 		}
 	}
+	return incomplete
 }
 
-func flattenJSONArray(prefix string, arr []any, dest map[string]string, depth int) {
-	if depth >= maxSchemaRecursionDepth || len(dest) >= maxFlattenedPaths {
-		return
+func flattenJSONArray(prefix string, arr []any, dest map[string]string, depth int) bool {
+	var incomplete bool
+	if depth >= maxSchemaRecursionDepth {
+		return true
+	}
+	if len(dest) >= maxFlattenedPaths {
+		return true
 	}
 	for i, item := range arr {
 		if len(dest) >= maxFlattenedPaths {
-			return
+			incomplete = true
+			break
 		}
 		path := fmt.Sprintf("%s[%d]", prefix, i)
 		switch v := item.(type) {
 		case map[string]any:
-			flattenJSONMap(path, v, dest, depth+1)
+			if flattenJSONMap(path, v, dest, depth+1) {
+				incomplete = true
+			}
 		case []any:
-			flattenJSONArray(path, v, dest, depth+1)
+			if flattenJSONArray(path, v, dest, depth+1) {
+				incomplete = true
+			}
 		default:
 			valStr := fmt.Sprintf("%v", v)
 			if len(valStr) > maxLeafValueLength {
 				valStr = valStr[:maxLeafValueLength]
+				incomplete = true
 			}
 			dest[path] = computeHMAC(domainPrefixSchemaPath, []byte(valStr))
 		}
 	}
+	return incomplete
 }
 
 // DriftResult reports the exact component and field-level difference between requests,
@@ -804,6 +942,20 @@ func CompareSnapshots(prev, curr RequestSnapshot) DriftResult {
 		return clientDrift
 	}
 
+	// If no difference was detected within bounded fingerprint limits, but truncation occurred:
+	// DO NOT mark requests as confirmed stable! Return a conservative incomplete result.
+	if prev.ComparisonIncomplete || curr.ComparisonIncomplete {
+		return DriftResult{
+			Detected:    false,
+			Attribution: AttributionOriginUnverified,
+			Component:   "tools",
+			Path:        "",
+			ChangeType:  "none",
+			Confirmed:   false,
+			Reason:      "Request schema or content exceeded fingerprint limits (comparison incomplete); structural stability cannot be confirmed",
+		}
+	}
+
 	// Stage 2: Client Input is identical across cache-sensitive components.
 	// Check if Outbound Provider-Bound Request is observable.
 	if !prev.OutboundObservable || !curr.OutboundObservable {
@@ -880,12 +1032,14 @@ func findFirstPathDiff(prev, curr map[string]string) (string, string) {
 type DiagnosisCategory string
 
 const (
-	DiagnosisConfirmedDrift DiagnosisCategory = "confirmed_drift"
-	DiagnosisStableMiss     DiagnosisCategory = "stable_miss"
-	DiagnosisStableHit      DiagnosisCategory = "stable_hit"
-	DiagnosisInitialRequest DiagnosisCategory = "initial_request"
-	DiagnosisUntracked      DiagnosisCategory = "untracked"
-	DiagnosisRefused        DiagnosisCategory = "refused"
+	DiagnosisConfirmedDrift     DiagnosisCategory = "confirmed_drift"
+	DiagnosisStableMiss         DiagnosisCategory = "stable_miss"
+	DiagnosisStableHit          DiagnosisCategory = "stable_hit"
+	DiagnosisInitialRequest     DiagnosisCategory = "initial_request"
+	DiagnosisUntracked          DiagnosisCategory = "untracked"
+	DiagnosisRefused            DiagnosisCategory = "refused"
+	DiagnosisStructurallyStable DiagnosisCategory = "structurally_stable"
+	DiagnosisUsageUnavailable   DiagnosisCategory = "usage_unavailable"
 )
 
 // SessionData holds the history entries for a single session.
@@ -1163,7 +1317,10 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 	}
 
 	// 5. Stable request, no reported cached tokens (CG003)
-	if diag.Diagnosis == DiagnosisStableMiss {
+	// Requires both usage metadata and explicit prompt token details.
+	// Because Bifrost's Go schema ChatPromptTokensDetails normalizes absent cached read tokens
+	// to zero (int), an explicit zero cannot be distinguished with certainty from an omitted metric.
+	if diag.Diagnosis == DiagnosisStableMiss && diag.HasUsage && diag.HasPromptDetails {
 		findings = append(findings, DiagnosticFinding{
 			Code:               CodeStableMissUnknownCause,
 			Severity:           SeverityInfo,
@@ -1171,7 +1328,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 			Path:               "",
 			EvidenceSource:     EvidenceProviderUsage,
 			Confidence:         ConfidenceObserved,
-			Message:            "The provider reported zero cached tokens although the observed request structure was stable. The cause is not established.",
+			Message:            "Zero cached read tokens observed for this structurally stable request prefix. Upstream schemas normalize omitted cache metrics to zero, so this may represent an explicit cache miss, cache ineligibility, or a provider omitting read metrics.",
 			SuggestedAction:    "Check provider cache eligibility, minimum prompt length, TTL, routing, and relevant caching configuration.",
 			OutboundObservable: outboundObservable,
 		})
@@ -1238,9 +1395,15 @@ func ValidateAndApplyConfig(raw any) (PluginConfig, error) {
 
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = DefaultMaxSessions
+	} else if cfg.MaxSessions > 100000 {
+		cfg.MaxSessions = 100000
+	} else if cfg.MaxSessions < 10 {
+		cfg.MaxSessions = 10
 	}
 	if cfg.MaxEntriesPerSession <= 0 {
 		cfg.MaxEntriesPerSession = DefaultMaxEntries
+	} else if cfg.MaxEntriesPerSession > 100 {
+		cfg.MaxEntriesPerSession = 100
 	}
 	if _, err := time.ParseDuration(cfg.SessionTTL); err != nil {
 		cfg.SessionTTL = "30m"

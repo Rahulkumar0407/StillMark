@@ -1309,6 +1309,7 @@ func TestScenarioB_StableMissUnknownCause(t *testing.T) {
 		TenantID:         "customer:cust-1",
 		Diagnosis:        DiagnosisStableMiss,
 		HasUsage:         true,
+		HasPromptDetails: true,
 		CachedReadTokens: 0,
 		Snapshot: RequestSnapshot{
 			OutboundObservable: true,
@@ -1323,7 +1324,7 @@ func TestScenarioB_StableMissUnknownCause(t *testing.T) {
 			assert.Equal(t, SeverityInfo, f.Severity)
 			assert.Equal(t, EvidenceProviderUsage, f.EvidenceSource)
 			assert.Equal(t, ConfidenceObserved, f.Confidence)
-			assert.Contains(t, f.Message, "The provider reported zero cached tokens although the observed request structure was stable. The cause is not established.")
+			assert.Contains(t, f.Message, "Zero cached read tokens observed")
 			assert.Contains(t, f.SuggestedAction, "Check provider cache eligibility, minimum prompt length, TTL, routing")
 		}
 	}
@@ -1817,3 +1818,837 @@ func TestCorrectness_MultiTurnConversationPrefixMutationDetectsDrift(t *testing.
 	assert.Equal(t, AttributionClientInputChanged, diag2.Attribution)
 	assert.Equal(t, DiagnosisConfirmedDrift, diag2.Diagnosis)
 }
+
+// TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitCG003 verifies that when a provider returns
+// an error, the failed turn does NOT overwrite session history in tracker and does NOT emit false CG003 warnings.
+func TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitCG003(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	sessID := "sess-error-guard-01"
+	custID := "cust-err-test"
+
+	// Turn 1: Healthy request
+	ctx1 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx1.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx1.SetValue(ctxSessionKey, sessID)
+
+	prompt1 := "Valid initial instruction"
+	req1 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt1}},
+			},
+		},
+	}
+	_, _, err := PreLLMHook(ctx1, req1)
+	require.NoError(t, err)
+
+	resp1 := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				PromptTokens: 100,
+				PromptTokensDetails: &schemas.ChatPromptTokensDetails{
+					CachedReadTokens: 50,
+				},
+			},
+		},
+	}
+	_, _, err = PostLLMHook(ctx1, resp1, nil)
+	require.NoError(t, err)
+
+	// Verify tracker recorded Turn 1
+	compKey := fmt.Sprintf("customer:%s|openai|gpt-4o|%s", custID, sessID)
+	snap1, exists := globalTracker.GetLatest(compKey)
+	require.True(t, exists)
+
+	// Turn 2: Request fails at provider with 500 error
+	ctx2 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx2.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx2.SetValue(ctxSessionKey, sessID)
+
+	prompt2 := "A changed prompt during failure"
+	req2 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt2}},
+			},
+		},
+	}
+	_, _, err = PreLLMHook(ctx2, req2)
+	require.NoError(t, err)
+
+	code500 := 500
+	providerErr := &schemas.BifrostError{
+		StatusCode: &code500,
+		Error: &schemas.ErrorField{
+			Message: "Internal server error from provider",
+		},
+	}
+	_, outErr, err := PostLLMHook(ctx2, nil, providerErr)
+	require.NoError(t, err)
+	assert.NotNil(t, outErr)
+
+	// Verify that Turn 2 failure was NOT committed to the tracker (snapshot must still match Turn 1)
+	snapAfterErr, exists := globalTracker.GetLatest(compKey)
+	require.True(t, exists)
+	assert.Equal(t, snap1.PrefixHMAC, snapAfterErr.PrefixHMAC, "tracker snapshot must not be replaced by a failed request")
+
+	// Verify that CG003 was NOT emitted on error
+	diag2, ok := GetRequestDiagnostic(ctx2)
+	require.True(t, ok)
+	for _, f := range diag2.Findings {
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "failed request must never emit CG003")
+	}
+}
+
+// TestHandling_MissingUsageDoesNotEmitCG003 verifies that when a provider does not report
+// token usage (e.g. usage block is nil), CacheGuard does not falsely diagnose a stable_miss.
+func TestHandling_MissingUsageDoesNotEmitCG003(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	sessID := "sess-no-usage-01"
+	custID := "cust-no-usage"
+
+	// Turn 1: Initial request
+	ctx1 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx1.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx1.SetValue(ctxSessionKey, sessID)
+
+	prompt := "Repeat prompt without usage"
+	req1 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt}},
+			},
+		},
+	}
+	_, _, _ = PreLLMHook(ctx1, req1)
+	resp1 := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: nil, // provider omitted usage metadata
+		},
+	}
+	_, _, _ = PostLLMHook(ctx1, resp1, nil)
+
+	// Turn 2: Repeat stable request, again with nil usage
+	ctx2 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx2.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx2.SetValue(ctxSessionKey, sessID)
+
+	req2 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt}},
+			},
+		},
+	}
+	_, _, err := PreLLMHook(ctx2, req2)
+	require.NoError(t, err)
+
+	resp2 := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: nil, // usage metadata absent
+		},
+	}
+	_, _, err = PostLLMHook(ctx2, resp2, nil)
+	require.NoError(t, err)
+
+	diag2, ok := GetRequestDiagnostic(ctx2)
+	require.True(t, ok)
+	assert.False(t, diag2.HasUsage)
+	assert.NotEqual(t, DiagnosisStableMiss, diag2.Diagnosis, "absent usage must not be labeled stable_miss")
+
+	for _, f := range diag2.Findings {
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing usage metadata must not emit CG003")
+	}
+}
+
+// ============================================================================
+// TASK 3 REGRESSION TESTS — BOUNDED MEMORY & CONCURRENCY
+// ============================================================================
+
+func TestSessionDomainTracker_BoundedCapacityAndEviction(t *testing.T) {
+	tracker := NewSessionDomainTracker(10, 5*time.Minute)
+	defer tracker.Clear()
+
+	// Insert 20 distinct sessions into a tracker with capacity 10
+	for i := 0; i < 20; i++ {
+		sessID := fmt.Sprintf("sess-%d", i)
+		changed, _ := tracker.CheckAndRecord("t1", sessID, "openai", "gpt-4o")
+		assert.False(t, changed)
+	}
+
+	// Verify tracker size is strictly bounded to maxSessions
+	assert.LessOrEqual(t, tracker.Count(), 10, "domain tracker must not exceed max capacity")
+
+	// Oldest entries (e.g. sess-0..9) should have been evicted; newest (e.g. sess-19) present
+	changed, prev := tracker.CheckAndRecord("t1", "sess-19", "openai", "gpt-4o")
+	assert.False(t, changed, "recent session should match without domain change")
+	assert.Equal(t, "openai|gpt-4o", prev)
+}
+
+func TestSessionDomainTracker_TTLEviction(t *testing.T) {
+	tracker := NewSessionDomainTracker(100, 50*time.Millisecond)
+	defer tracker.Clear()
+
+	sessID := "sess-expire-test"
+	changed, prev := tracker.CheckAndRecord("t1", sessID, "openai", "gpt-4o")
+	assert.False(t, changed)
+	assert.Equal(t, "", prev)
+
+	// Wait for TTL expiration
+	time.Sleep(70 * time.Millisecond)
+
+	// Record with different domain: since previous expired, it should be treated as initial/new
+	changedAfterExpire, prevAfterExpire := tracker.CheckAndRecord("t1", sessID, "anthropic", "claude-3-5-sonnet")
+	assert.False(t, changedAfterExpire, "expired session domain should not flag change on new baseline")
+	assert.Equal(t, "", prevAfterExpire)
+}
+
+func TestSessionDomainTracker_ConcurrentAdversarialLoad(t *testing.T) {
+	const maxCap = 25
+	tracker := NewSessionDomainTracker(maxCap, 1*time.Minute)
+	defer tracker.Clear()
+
+	var wg sync.WaitGroup
+	const goroutines = 20
+	const opsPerGoroutine = 100
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				sessID := fmt.Sprintf("sess-%d-%d", gid, i)
+				tracker.CheckAndRecord(fmt.Sprintf("t%d", gid), sessID, fmt.Sprintf("prov-%d", gid%3), fmt.Sprintf("mod-%d", i%2))
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	assert.LessOrEqual(t, tracker.Count(), maxCap, "concurrent load must not breach maxSessions boundary")
+}
+
+// ============================================================================
+// TASK 4 REGRESSION TESTS — FINGERPRINT BOUNDARY & INCOMPLETE STATUS
+// ============================================================================
+
+func TestFingerprint_MultipleSystemAndDeveloperMessages(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	sys1 := "You are a helpful assistant."
+	sys2 := "Always respond concisely."
+	devMsg := "Developer instruction: no formatting."
+
+	req1 := &schemas.BifrostChatRequest{
+		Model:    "gpt-4o",
+		Provider: "openai",
+		Input: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleSystem, Content: &schemas.ChatMessageContent{ContentStr: &sys1}},
+			{Role: schemas.ChatMessageRoleDeveloper, Content: &schemas.ChatMessageContent{ContentStr: &devMsg}},
+			{Role: schemas.ChatMessageRoleSystem, Content: &schemas.ChatMessageContent{ContentStr: &sys2}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &sys1}},
+		},
+	}
+
+	hmac1, _ := ExtractPrefixSnapshot(req1)
+	assert.NotEmpty(t, hmac1)
+
+	// Mutate the second system message
+	sys2Mutated := "Always respond with extreme detail."
+	req2 := &schemas.BifrostChatRequest{
+		Model:    "gpt-4o",
+		Provider: "openai",
+		Input: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleSystem, Content: &schemas.ChatMessageContent{ContentStr: &sys1}},
+			{Role: schemas.ChatMessageRoleDeveloper, Content: &schemas.ChatMessageContent{ContentStr: &devMsg}},
+			{Role: schemas.ChatMessageRoleSystem, Content: &schemas.ChatMessageContent{ContentStr: &sys2Mutated}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &sys1}},
+		},
+	}
+
+	hmac2, _ := ExtractPrefixSnapshot(req2)
+	assert.NotEqual(t, hmac1, hmac2, "mutating any system message must alter system HMAC")
+
+	snap1 := RequestSnapshot{PrefixHMAC: hmac1}
+	snap2 := RequestSnapshot{PrefixHMAC: hmac2}
+	drift := CompareSnapshots(snap1, snap2)
+	assert.True(t, drift.Detected)
+	assert.Equal(t, "system_prompt", drift.Component)
+}
+
+func TestFingerprint_MultimodalContent(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	imgURL1 := "https://example.com/image1.png"
+	imgURL2 := "https://example.com/image2.png"
+	textBlock := "Analyze this image"
+
+	req1 := &schemas.BifrostChatRequest{
+		Model:    "gpt-4o",
+		Provider: "openai",
+		Input: []schemas.ChatMessage{
+			{
+				Role: schemas.ChatMessageRoleSystem,
+				Content: &schemas.ChatMessageContent{
+					ContentBlocks: []schemas.ChatContentBlock{
+						{Type: schemas.ChatContentBlockTypeText, Text: &textBlock},
+						{Type: schemas.ChatContentBlockTypeImage, ImageURLStruct: &schemas.ChatInputImage{URL: imgURL1}},
+					},
+				},
+			},
+		},
+	}
+
+	req2 := &schemas.BifrostChatRequest{
+		Model:    "gpt-4o",
+		Provider: "openai",
+		Input: []schemas.ChatMessage{
+			{
+				Role: schemas.ChatMessageRoleSystem,
+				Content: &schemas.ChatMessageContent{
+					ContentBlocks: []schemas.ChatContentBlock{
+						{Type: schemas.ChatContentBlockTypeText, Text: &textBlock},
+						{Type: schemas.ChatContentBlockTypeImage, ImageURLStruct: &schemas.ChatInputImage{URL: imgURL2}},
+					},
+				},
+			},
+		},
+	}
+
+	hmac1, _ := ExtractPrefixSnapshot(req1)
+	hmac2, _ := ExtractPrefixSnapshot(req2)
+
+	assert.NotEqual(t, hmac1, hmac2, "different multimodal image URLs must alter HMAC")
+}
+
+func TestFingerprint_OversizedToolDescriptionSetsIncomplete(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	hugeDesc := strings.Repeat("A", 2500) // Exceeds 2048 bytes
+	var params schemas.ToolFunctionParameters
+	_ = json.Unmarshal([]byte(`{"type":"object","properties":{"id":{"type":"string"}}}`), &params)
+
+	tools := []schemas.ChatTool{
+		{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "huge_tool",
+				Description: &hugeDesc,
+				Parameters:  &params,
+			},
+		},
+	}
+
+	_, _, incomplete := FlattenToolSchemasWithStatus(tools)
+	assert.True(t, incomplete, "tool description exceeding 2048 bytes must flag incomplete")
+
+	snap1 := RequestSnapshot{
+		PrefixHMAC:           "same-sys",
+		ToolsHMAC:            "same-tools",
+		ComparisonIncomplete: true,
+	}
+	snap2 := RequestSnapshot{
+		PrefixHMAC:           "same-sys",
+		ToolsHMAC:            "same-tools",
+		ComparisonIncomplete: true,
+	}
+
+	// CompareSnapshots must NOT falsely classify as confirmed stable!
+	drift := CompareSnapshots(snap1, snap2)
+	assert.False(t, drift.Detected)
+	assert.Equal(t, AttributionOriginUnverified, drift.Attribution, "incomplete comparison must be marked unverified, never confirmed stable")
+	assert.Contains(t, drift.Reason, "comparison incomplete")
+}
+
+func TestFingerprint_LargeSchemaPathLimitSetsIncomplete(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	props := make(map[string]any)
+	for i := 0; i < 550; i++ {
+		props[fmt.Sprintf("field_%d", i)] = map[string]any{"type": "string"}
+	}
+	wideBytes, _ := json.Marshal(map[string]any{
+		"type":       "object",
+		"properties": props,
+	})
+	var wideParams schemas.ToolFunctionParameters
+	_ = json.Unmarshal(wideBytes, &wideParams)
+
+	tools := []schemas.ChatTool{
+		{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:       "wide_tool",
+				Parameters: &wideParams,
+			},
+		},
+	}
+
+	_, _, incomplete := FlattenToolSchemasWithStatus(tools)
+	assert.True(t, incomplete, "schema exceeding 512 paths must flag incomplete")
+}
+
+// ============================================================================
+// TASK 5 REGRESSION TESTS — CACHE METRICS & STREAMING RESPONSE HEADERS
+// ============================================================================
+
+func TestCacheMetric_MissingPromptTokensDetailsDoesNotEmitStableMiss(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	sessID := "sess-details-nil-01"
+	custID := "cust-details-nil"
+
+	// Turn 1
+	ctx1 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx1.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx1.SetValue(ctxSessionKey, sessID)
+
+	prompt := "Stable prompt"
+	req1 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt}},
+			},
+		},
+	}
+	_, _, _ = PreLLMHook(ctx1, req1)
+	resp1 := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{PromptTokens: 100},
+		},
+	}
+	_, _, _ = PostLLMHook(ctx1, resp1, nil)
+
+	// Turn 2: Repeat stable request, provider returns usage with PromptTokensDetails = nil
+	ctx2 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx2.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, custID)
+	ctx2.SetValue(ctxSessionKey, sessID)
+
+	req2 := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: "openai",
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &prompt}},
+			},
+		},
+	}
+	_, _, _ = PreLLMHook(ctx2, req2)
+
+	// Verify in PreLLMHook that diagnosis is structurally_stable, NOT stable_miss
+	diagPre, ok := GetRequestDiagnostic(ctx2)
+	require.True(t, ok)
+	assert.Equal(t, DiagnosisStructurallyStable, diagPre.Diagnosis, "PreLLMHook must assign structurally_stable before usage is known")
+
+	// PostLLMHook with PromptTokensDetails = nil
+	resp2 := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				PromptTokens:        100,
+				PromptTokensDetails: nil, // provider omitted details
+			},
+		},
+	}
+	_, _, err := PostLLMHook(ctx2, resp2, nil)
+	require.NoError(t, err)
+
+	diagPost, ok := GetRequestDiagnostic(ctx2)
+	require.True(t, ok)
+	assert.Equal(t, DiagnosisUsageUnavailable, diagPost.Diagnosis, "missing PromptTokensDetails must result in usage_unavailable, NOT stable_miss")
+
+	// Verify CG003 is NOT emitted
+	for _, f := range diagPost.Findings {
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing PromptTokensDetails must not emit CG003")
+	}
+}
+
+func TestCacheMetric_ResolvesHitAndMissWhenDetailsPresent(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	// Hit case
+	diagHit := &RequestDiagnostic{
+		StructurallyStable: true,
+		Diagnosis:          DiagnosisStructurallyStable,
+	}
+	ctxHit := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctxHit.SetValue(ctxDiagKey, diagHit)
+	respHit := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				PromptTokens: 100,
+				PromptTokensDetails: &schemas.ChatPromptTokensDetails{
+					CachedReadTokens: 64,
+				},
+			},
+		},
+	}
+	_, _, _ = PostLLMHook(ctxHit, respHit, nil)
+	assert.Equal(t, DiagnosisStableHit, diagHit.Diagnosis)
+	assert.Equal(t, 64, diagHit.CachedReadTokens)
+
+	// Miss case (explicit zero cached tokens)
+	diagMiss := &RequestDiagnostic{
+		StructurallyStable: true,
+		Diagnosis:          DiagnosisStructurallyStable,
+	}
+	ctxMiss := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctxMiss.SetValue(ctxDiagKey, diagMiss)
+	respMiss := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				PromptTokens: 100,
+				PromptTokensDetails: &schemas.ChatPromptTokensDetails{
+					CachedReadTokens: 0,
+				},
+			},
+		},
+	}
+	_, _, _ = PostLLMHook(ctxMiss, respMiss, nil)
+	assert.Equal(t, DiagnosisStableMiss, diagMiss.Diagnosis)
+	assert.Equal(t, 0, diagMiss.CachedReadTokens)
+}
+
+// ============================================================================
+// TASK 6 REGRESSION TESTS — PRIVACY & DATA LEAK REDACTION
+// ============================================================================
+
+func TestPrivacy_HeadersOmitSensitiveFields(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	diag := &RequestDiagnostic{
+		Diagnosis:      DiagnosisConfirmedDrift,
+		Attribution:    AttributionClientInputChanged,
+		DomainChanged:  true,
+		PreviousDomain: "secret-provider|secret-model",
+		Drift: DriftResult{
+			Detected:   true,
+			Component:  "tools",
+			Path:       "tools[0].function.parameters.properties.raw_secret_key.type\n\r",
+			ChangeType: "modified",
+			Reason:     "client secret param was modified",
+		},
+		HasUsage:         true,
+		HasPromptDetails: false, // Cached-Tokens should NOT be emitted
+		PromptTokens:     100,
+		CachedReadTokens: 0,
+	}
+	ctx.SetValue(ctxDiagKey, diag)
+
+	meta := &schemas.HTTPResponseMetadata{
+		Headers: make(map[string]string),
+	}
+
+	err := HTTPTransportResponseHeadersHook(ctx, nil, meta)
+	require.NoError(t, err)
+
+	// Sensitive fields must be omitted
+	assert.Empty(t, meta.Headers["X-Cacheguard-Previous-Domain"], "previous domain must be omitted from headers")
+	assert.Empty(t, meta.Headers["X-Cacheguard-Drift-Reason"], "drift reason derived from client must be omitted")
+	assert.Empty(t, meta.Headers["X-Cacheguard-Cached-Tokens"], "cached tokens must be omitted when details unavailable")
+
+	// Domain changed flag is kept
+	assert.Equal(t, "true", meta.Headers["X-Cacheguard-Domain-Changed"])
+
+	// Detailed schema path is opt-in via server config only: default is false, so path must be omitted for privacy
+	assert.Empty(t, meta.Headers["X-Cacheguard-Drift-Path"], "detailed schema path must be omitted by default to avoid leaking property names")
+
+	// Verify client-supplied header CANNOT bypass operator privacy policy
+	metaClientAttempt := &schemas.HTTPResponseMetadata{
+		Headers: make(map[string]string),
+	}
+	reqClientAttempt := &schemas.HTTPRequest{
+		Headers: map[string]string{
+			"x-cacheguard-expose-paths": "true",
+		},
+	}
+	err = HTTPTransportResponseHeadersHook(ctx, reqClientAttempt, metaClientAttempt)
+	require.NoError(t, err)
+	assert.Empty(t, metaClientAttempt.Headers["X-Cacheguard-Drift-Path"], "arbitrary client header must not enable schema path disclosure")
+
+	// When explicitly opted in via trusted SERVER configuration, path is emitted and sanitized
+	_ = Init(map[string]any{
+		"expose_schema_paths": true,
+	})
+	defer func() {
+		_ = Init(map[string]any{
+			"expose_schema_paths": false,
+		})
+	}()
+
+	metaServerOptIn := &schemas.HTTPResponseMetadata{
+		Headers: make(map[string]string),
+	}
+	err = HTTPTransportResponseHeadersHook(ctx, nil, metaServerOptIn)
+	require.NoError(t, err)
+	cleanPath := metaServerOptIn.Headers["X-Cacheguard-Drift-Path"]
+	assert.NotEmpty(t, cleanPath, "detailed schema path should be emitted when enabled by server config")
+	assert.NotContains(t, cleanPath, "\n")
+	assert.NotContains(t, cleanPath, "\r")
+}
+
+func TestCacheMetric_NonNilDetailsWithoutCacheMetricSuppressesCG003(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	// Stable turn with PromptTokensDetails present, but containing ONLY non-cache tokens (e.g. AudioTokens)
+	diag := &RequestDiagnostic{
+		StructurallyStable: true,
+		Diagnosis:          DiagnosisStructurallyStable,
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	ctx.SetValue(ctxDiagKey, diag)
+
+	resp := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				PromptTokens: 120,
+				PromptTokensDetails: &schemas.ChatPromptTokensDetails{
+					AudioTokens:      25,
+					CachedReadTokens: 0, // Go normalized absent cached_read_tokens to zero!
+				},
+			},
+		},
+	}
+
+	_, _, err := PostLLMHook(ctx, resp, nil)
+	require.NoError(t, err)
+
+	// Must NOT label as stable_miss because the provider never supplied cache metrics
+	assert.Equal(t, DiagnosisUsageUnavailable, diag.Diagnosis, "non-nil details with only audio/image tokens must be diagnosed usage_unavailable")
+	assert.False(t, diag.HasPromptDetails, "HasPromptDetails must be false when no cache metric was provided")
+
+	findings := BuildDiagnosticFindings(diag)
+	for _, f := range findings {
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "CG003 must be suppressed when provider never provided cache metric")
+	}
+}
+
+func TestSecurity_HMACConcurrencyWithCleanup(t *testing.T) {
+	var wg sync.WaitGroup
+	const goroutines = 20
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				data := []byte(fmt.Sprintf("concurrent-payload-%d-%d", idx, j))
+				_ = computeHMAC(domainPrefixPrompt, data)
+				if j%10 == 0 {
+					// Simulate concurrent key initialization
+					InitEngine(100, 10, 1*time.Minute)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// ============================================================================
+// MICRO-BENCHMARKS: CPU & ALLOCATION PROFILING FOR NESTED TOOLS WORKLOAD
+// ============================================================================
+
+func BenchmarkPreLLMHook_NestedTools(b *testing.B) {
+	InitEngine(1000, 10, 30*time.Minute)
+	defer CleanupEngine()
+
+	schemaJSON := []byte(`{
+		"type": "object",
+		"properties": {
+			"query": {"type": "string"},
+			"filters": {
+				"type": "object",
+				"properties": {
+					"status": {"type": "string"},
+					"range": {
+						"type": "object",
+						"properties": {
+							"start": {"type": "integer"},
+							"end": {"type": "integer"}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	var params schemas.ToolFunctionParameters
+	_ = json.Unmarshal(schemaJSON, &params)
+
+	toolDesc := "Query metrics with filters"
+	tools := []schemas.ChatTool{
+		{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "query_metrics",
+				Description: &toolDesc,
+				Parameters:  &params,
+			},
+		},
+	}
+
+	sysPrompt := "You are an analytical assistant."
+	req := &schemas.BifrostRequest{
+		ChatRequest: &schemas.BifrostChatRequest{
+			Model:    "gpt-4o",
+			Provider: schemas.OpenAI,
+			Input: []schemas.ChatMessage{
+				{Role: schemas.ChatMessageRoleSystem, Content: &schemas.ChatMessageContent{ContentStr: &sysPrompt}},
+			},
+			Params: &schemas.ChatParameters{
+				Tools: tools,
+			},
+		},
+	}
+
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(10*time.Second))
+	ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, "bench-tenant")
+	ctx.SetValue(ctxSessionKey, "bench-session-id")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, _, _ = PreLLMHook(ctx, req)
+	}
+}
+
+func BenchmarkToolSchema_FlatteningOnly(b *testing.B) {
+	schemaJSON := []byte(`{
+		"type": "object",
+		"properties": {
+			"query": {"type": "string"},
+			"filters": {
+				"type": "object",
+				"properties": {
+					"status": {"type": "string"},
+					"range": {
+						"type": "object",
+						"properties": {
+							"start": {"type": "integer"},
+							"end": {"type": "integer"}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	var params schemas.ToolFunctionParameters
+	_ = json.Unmarshal(schemaJSON, &params)
+	toolDesc := "Query metrics"
+	tools := []schemas.ChatTool{
+		{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "query_metrics",
+				Description: &toolDesc,
+				Parameters:  &params,
+			},
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, _, _ = FlattenToolSchemasWithStatus(tools)
+	}
+}
+
+func BenchmarkHMAC_ComputeOnly(b *testing.B) {
+	InitEngine(100, 10, 10*time.Minute)
+	defer CleanupEngine()
+
+	data := []byte("system:You are a high-performance Bifrost AI gateway tester;tools:query_metrics:v1;")
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = computeHMAC(domainPrefixPrompt, data)
+	}
+}
+
+func TestStreamingTransformationTiming_HeadersHookDoesNotEmitPrematureCG002OrCG007(t *testing.T) {
+	InitEngine(100, 10, 5*time.Minute)
+	defer CleanupEngine()
+
+	// In a streaming request lifecycle:
+	// 1. PreLLMHook runs and sets up diag
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
+	chatReq := &schemas.BifrostChatRequest{
+		Model: "claude-3-5-sonnet-20241022",
+		Input: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("Hello")}},
+		},
+	}
+	req := &schemas.BifrostRequest{ChatRequest: chatReq}
+	_, _, err := PreLLMHook(ctx, req)
+	require.NoError(t, err)
+
+	// 2. HTTPTransportResponseHeadersHook runs BEFORE stream chunks arrive.
+	// At this stage, PostLLMHook has not run, so RawRequest has not been observed.
+	// Transformation must remain None, and neither CG002 nor CG007 can appear in headers.
+	meta := &schemas.HTTPResponseMetadata{
+		Headers: make(map[string]string),
+	}
+	err = HTTPTransportResponseHeadersHook(ctx, nil, meta)
+	require.NoError(t, err)
+
+	assert.Empty(t, meta.Headers["X-Cacheguard-Transformation"], "transformation cannot be emitted before PostLLMHook observes outbound request")
+	assert.Empty(t, meta.Headers["X-Cacheguard-Injected-Path"], "injected path cannot be emitted prematurely")
+	assert.Empty(t, meta.Headers["X-Cacheguard-Finding-Code"], "CG002/CG007 must not appear in streaming response headers before observation")
+
+	// 3. Subsequently, in PostLLMHook (chunk 1), raw request is observed
+	resp := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			ExtraFields: schemas.BifrostResponseExtraFields{
+				RawRequest: map[string]any{
+					"messages": []any{
+						map[string]any{
+							"role": "user",
+							"content": []any{
+								map[string]any{
+									"type": "text",
+									"text": "Hello",
+									"cache_control": map[string]any{
+										"type": "ephemeral",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	// PostLLMHook observes the transformation
+	_, _, err = PostLLMHook(ctx, resp, nil)
+	require.NoError(t, err)
+
+	// Findings are now available post-stream
+	diagVal := ctx.Value(ctxDiagKey)
+	require.NotNil(t, diagVal)
+	diag := diagVal.(*RequestDiagnostic)
+	assert.Equal(t, TransformationCacheControlInjected, diag.Transformation.Type)
+	require.NotNil(t, diag.PrimaryFinding)
+	assert.Equal(t, CodeGatewayBreakpointInjected, diag.PrimaryFinding.Code)
+}
+

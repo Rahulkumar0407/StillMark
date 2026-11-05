@@ -1,6 +1,8 @@
-# Bifrost CacheGuard Plugin
+# StillMark (formerly CacheGuard)
 
-**CacheGuard** is an open-source, operator-focused diagnostic plugin for [Bifrost](https://github.com/maximhq/bifrost). It detects, attributes, and explains prompt-cache degradation and structural request drift without logging sensitive prompt text or secrets.
+### Bifrost Prompt-Cache Integrity & Diagnostics Plugin
+
+**StillMark** is an open-source, operator-focused diagnostic plugin for the [Bifrost AI Gateway](https://github.com/maximhq/bifrost). It detects, attributes, and explains prompt-cache degradation and structural request drift across LLM calls without logging or exposing sensitive prompt text or credentials.
 
 ---
 
@@ -18,28 +20,30 @@ However, in production environments:
 
 ---
 
-## What CacheGuard Does
+## What StillMark Does
 
-CacheGuard runs inside the Bifrost gateway pipeline (using `PreLLMHook`, `PostLLMHook`, `HTTPTransportPreHook`, and `HTTPTransportResponseHeadersHook`) and provides:
+StillMark runs inside the Bifrost gateway pipeline (using `PreLLMHook`, `PostLLMHook`, `HTTPTransportPreHook`, and `HTTPTransportResponseHeadersHook`) and provides:
 
 - **Keyed Cryptographic Fingerprints**: Hashes prompts, system instructions, and schema paths using process-local HMAC-SHA256 secrets. Rainbow-table attacks against predictable strings are prevented.
 - **Canonical Nested Schema Flattening**: Recursively walks arbitrary JSON schemas in tool definitions up to a bounded depth of 16 levels and 512 flattened paths, indexing individual leaf properties (e.g. `tools[0].function.parameters.properties.node_id.type`) to pinpoint exact field mutations.
 - **Conversation Prefix Awareness**: Distinguishes static cached prompt prefixes from normal multi-turn message appending. Appending new user/assistant turns does not falsely trigger drift; only mutations to previously established static prefixes or tool schemas are flagged.
 - **Tenant & Domain Isolation**: Session state is isolated strictly by authenticated tenant (`customer:<id>` or `virtual_key:<id>`), provider, and model. Unauthenticated or unverified requests are safely marked `untracked` or `refused` and never cross-compared.
-- **Fail-Open Fault Tolerance**: Every plugin hook wraps internal operations in panic recovery handlers. Even if an unexpected error occurs, client inference requests are never failed or interrupted.
+- **Fail-Open Fault Tolerance**: Every plugin hook wraps internal operations in panic recovery handlers. Even in the event of an unexpected internal error, client inference requests are never failed or interrupted.
+- **Error & Missing-Usage Protection**: Failed provider requests (HTTP 500, timeouts) are never committed to session history, and missing usage metadata is never falsely labeled as a cache miss.
 - **Verified Within-Request Transformation Detection**: Detects when Bifrost injects or clamps cache-control markers (e.g. Anthropic prompt caching auto-injection) before dispatching to the provider.
 - **Privacy-Safe Human-Readable Diagnostics**: Translates observations into stable codes (`CG001`–`CG007`) with plain-English operator guidance, severity ratings, and actionable troubleshooting steps.
 - **Safe Rate-Limited Operator Logging**: Emits structured logs directly to `ctx.Log(...)` and standard output, rate-limited per trusted scope to avoid log flooding.
 
 ---
 
-## What CacheGuard Does NOT Prove
+## What StillMark Does NOT Prove
 
 To maintain operator trust and avoid misleading claims:
-- **Observational Only**: CacheGuard is an observational diagnostic tool. It does **not** guarantee provider cache hits or provider billing reductions.
-- **No Automatic Request Rewriting**: CacheGuard does not mutate, reorder, or alter client prompts. It is fail-open by design.
-- **No False Accusations of Provider Billing Errors**: CacheGuard distinguishes between observed data and inferred causes. For example, a stable miss is diagnosed as unknown-cause (`CG003`), rather than an unproven claim of provider malfunction or eviction.
-- **No Unproven Provider Compatibilities**: For providers like OpenRouter where multiple Gemini cache-control markers are documented to use only the final breakpoint as the cache prefix, CacheGuard notes the configuration (`CG006`) without falsely claiming double billing or API failure.
+- **Observational Only**: StillMark is an observational diagnostic tool. It does **not** guarantee provider cache hits or provider billing reductions.
+- **No Automatic Request Rewriting**: StillMark does not mutate, reorder, or alter client prompts. It is fail-open by design.
+- **No False Accusations of Provider Billing Errors**: StillMark distinguishes between observed data and inferred causes. For example, a stable miss is diagnosed as unknown-cause (`CG003`), rather than an unproven claim of provider malfunction or eviction.
+- **No Unproven Provider Compatibilities**: For providers like OpenRouter where multiple Gemini cache-control markers are documented to use only the final breakpoint as the cache prefix, StillMark notes the configuration (`CG006`) without falsely claiming double billing or API failure.
+- **Synthetic Metrics Notice**: All local mock metrics in tests and demonstrations are explicitly labeled **SIMULATED** and do not represent real-world dollar savings without live provider benchmarking.
 
 ---
 
@@ -69,6 +73,11 @@ Client HTTP Request
 Client HTTP Response
 ```
 
+### Note on Streaming (SSE) Requests
+In HTTP streaming mode (`stream: true`), HTTP response headers (`Content-Type: text/event-stream`, `HTTP/1.1 200 OK`) are sent over the wire before streaming chunks arrive. 
+- Structural drift (`confirmed_drift`, `tools`, `system_prompt`) and transformation diagnostics (`CG001`, `CG002`, `CG007`) are evaluated during `PreLLMHook` and reflected in response headers.
+- Provider token usage metrics (`X-Cacheguard-Prompt-Tokens`, `X-Cacheguard-Cached-Tokens`) and `stable_hit`/`stable_miss` are evaluated in `PostLLMHook` once stream chunks finish accumulating. They are recorded in operator logs, but cannot be added to HTTP headers after streaming has already commenced.
+
 ---
 
 ## Diagnostic Findings Reference (CG001–CG007)
@@ -87,7 +96,7 @@ Client HTTP Response
 
 ## Response Headers
 
-When active, CacheGuard adds non-sensitive diagnostic headers to HTTP responses:
+When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 
 - `X-Cacheguard-Status`: `active`
 - `X-Cacheguard-Observed`: Total count of observed requests by this plugin instance.
@@ -104,77 +113,64 @@ When active, CacheGuard adds non-sensitive diagnostic headers to HTTP responses:
 
 ---
 
-## Privacy, Security & Resource Boundaries
+## One-Command Installation & Management
 
-CacheGuard enforces strict data minimization and resource safety:
-1. **Zero Prompt Storage**: Raw prompt text, user messages, and parameter values are never retained in memory, written to disk, or sent to logs.
-2. **Process-Local HMAC-SHA256**: Keyed hashing prevents rainbow-table correlation across processes. The 256-bit key is generated from system entropy at startup and zeroed out on cleanup.
-3. **No Credential Exposure**: Authorization headers, virtual key secrets, and provider API keys are never inspected, stored, or exposed.
-4. **Recursion & Schema Limits**:
-   - Max recursion depth: **16 levels**
-   - Max flattened paths: **512 paths**
-   - Max leaf value length: **2,048 characters**
-5. **Bounded LRU Memory**: Session tracker is limited to `max_sessions: 10000`, `max_entries_per_session: 10`, and `session_ttl: 30m`.
-6. **Bounded Rate Limiter**: Operator finding alerts are rate-limited per tenant/code scope and evicted using LRU buffers capped at 1,000 entries.
-
----
-
-## Real Gateway Performance Benchmarks
-
-Measured on an AMD Ryzen 5 3500U Linux environment (600 requests per mode, concurrency = 6, local mock provider):
-
-| Mode | Gateway Setup | Requests/sec | Mean Latency | p50 Latency | p95 Latency | p99 Latency | p50 Delta vs Stock |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Mode A** | Stock Bifrost (Baseline, No Plugin) | 2,457.0 | 2.38 ms | 2.08 ms | 4.23 ms | 5.72 ms | — |
-| **Mode B** | CacheGuard Enabled (No Session ID) | 2,369.5 | 2.46 ms | 2.16 ms | 4.06 ms | 5.48 ms | **+85 µs (+4.08%)** |
-| **Mode C** | CacheGuard Enabled (Session Tracking + Nested Tools) | 1,705.3 | 3.43 ms | 2.86 ms | 6.73 ms | 11.40 ms | **+783 µs (+37.71%)** |
-
-### Micro-Benchmarks (`go test -bench=. -benchmem`)
-```text
-BenchmarkComputeHMAC-8            468,705 ops    2,412 ns/op       664 B/op      9 allocs/op
-BenchmarkFlattenToolSchemas-8      11,298 ops  109,314 ns/op    19,788 B/op    233 allocs/op
-BenchmarkSessionTrackerLookup-8 11,687,527 ops    101.7 ns/op        0 B/op      0 allocs/op
-BenchmarkDiagnosticEvaluation-8   461,870 ops    3,131 ns/op       672 B/op     10 allocs/op
-```
-
----
-
-## Quickstart & 7-Step Reproducible Demo
-
-You can run the full 7-step demonstration locally with **zero paid APIs** using synthetic credentials and local mock backends.
+StillMark includes an auditable, safe Go installer that verifies prerequisites, compiles the `.so` plugin against your exact Bifrost checkout, checks binary symbol compatibility, and safely activates the plugin in `config.json`.
 
 ### Prerequisites
-- Linux (`amd64` or `arm64`) or macOS (`darwin/amd64`, `darwin/arm64`)
-- Go 1.24+ (matching Bifrost build toolchain)
-- `make` and `gcc` (for CGO plugin compilation)
+- **Operating System**: Linux (`amd64`, `arm64`) or macOS (`darwin/amd64`, `darwin/arm64`). *(Windows is not supported by Go's standard `plugin` package).*
+- **Go Toolchain**: Go 1.24+ (matching your Bifrost build compiler).
+- **CGO Compiler**: `gcc` or `clang` in PATH.
 
-### Run the Demo
+### 1. Build and Install (Without Activation)
 ```bash
-cd plugins/cacheguard
-make demo
+make install BIFROST_DIR=/path/to/Bifrost
+```
+Compiles `cacheguard.so`, places it at `<BIFROST_DIR>/plugins/cacheguard/build/cacheguard.so`, and verifies its symbols without altering any gateway configuration.
+
+### 2. One-Command Build, Install, and Automatic Activation
+```bash
+make install BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json
+```
+- Creates an automatic, timestamped backup (`config.json.bak.<timestamp>`).
+- Safely registers or updates the `cacheguard` entry in `config.json`.
+- Idempotent: running multiple times never duplicates configuration entries.
+
+### 3. Dry-Run Mode
+Preview exactly what the installer would do without modifying any files:
+```bash
+make install BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json DRY_RUN=1
 ```
 
-The demo script automatically:
-1. Boots stock Bifrost on port 8081 without the plugin.
-2. Compiles and loads `cacheguard.so` into stock Bifrost.
-3. Sends an initial tracked request (`initial_request`).
-4. Sends an identical request with simulated cache hit (`stable_hit`, 150 cached tokens).
-5. Mutates a nested tool schema parameter (`string` -> `integer`), verifying `confirmed_drift` and `CG001`.
-6. Sends a stable request with zero cached tokens, verifying unknown-cause miss diagnosis `CG003`.
-7. Sends an Anthropic message through Bifrost, proving detection of automatic cache-control injection (`CG002`).
+### 4. Verify Installed Plugin Binary
+Verify that an installed plugin `.so` is valid and exports all required Bifrost hook symbols:
+```bash
+make verify BIFROST_DIR=/path/to/Bifrost
+```
+
+### 5. Safe One-Command Uninstall
+```bash
+make uninstall BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json
+```
+- Removes the compiled `cacheguard.so` file and its empty directory.
+- Deactivates StillMark from `config.json` (with automatic backup).
+- **Preserves** all other Bifrost plugins and configuration.
+- Refuses dangerous or ambiguous paths (such as `/` or empty arguments).
 
 ---
 
 ## Configuration Reference
 
-Add CacheGuard to your Bifrost `config.json`:
+Manual configuration entry for `config.json`:
 
 ```json
 {
   "plugins": [
     {
       "name": "cacheguard",
+      "type": "shared_object",
       "path": "/absolute/path/to/plugins/cacheguard/build/cacheguard.so",
+      "enabled": true,
       "config": {
         "enabled": true,
         "diagnostic_logging": true,
@@ -198,6 +194,72 @@ Valid format: 8–64 alphanumeric characters, underscores, or hyphens (`^[a-zA-Z
 
 ---
 
+## Real Gateway Performance Benchmarks
+
+Measured on an AMD Ryzen 5 Linux environment (600 requests per mode, concurrency = 6, local mock provider):
+
+| Mode | Gateway Setup | Requests/sec | Mean Latency | p50 Latency | p95 Latency | p99 Latency | p50 Delta vs Stock |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Mode A** | Stock Bifrost (Baseline, No Plugin) | 2,457.0 | 2.38 ms | 2.08 ms | 4.23 ms | 5.72 ms | — |
+| **Mode B** | StillMark Enabled (No Session ID) | 2,369.5 | 2.46 ms | 2.16 ms | 4.06 ms | 5.48 ms | **+85 µs (+4.08%)** |
+| **Mode C** | StillMark Enabled (Session Tracking + Nested Tools) | 1,705.3 | 3.43 ms | 2.86 ms | 6.73 ms | 11.40 ms | **+783 µs (+37.71%)** |
+
+### Micro-Benchmarks (`go test -bench=. -benchmem`)
+```text
+BenchmarkComputeHMAC-8            468,705 ops    2,412 ns/op       664 B/op      9 allocs/op
+BenchmarkFlattenToolSchemas-8      11,298 ops  109,314 ns/op    19,788 B/op    233 allocs/op
+BenchmarkSessionTrackerLookup-8 11,687,527 ops    101.7 ns/op        0 B/op      0 allocs/op
+BenchmarkDiagnosticEvaluation-8   461,870 ops    3,131 ns/op       672 B/op     10 allocs/op
+```
+
+---
+
+## Quickstart & 7-Step Reproducible Demo
+
+Run the full 7-step demonstration locally with **zero paid APIs** using synthetic credentials and local mock backends:
+
+```bash
+cd plugins/cacheguard
+make demo
+```
+
+The automated demo walks through:
+1. Running stock Bifrost without the plugin.
+2. Compiling and loading the StillMark `.so` plugin into stock Bifrost.
+3. Sending an initial tracked request (`initial_request`).
+4. Sending an identical request with simulated cache hit (`stable_hit`, 150 cached tokens).
+5. Mutating a nested tool schema parameter (`string` -> `integer`), verifying `confirmed_drift` and `CG001`.
+6. Sending a stable request with zero cached tokens, verifying unknown-cause miss diagnosis `CG003`.
+7. Sending an Anthropic message through Bifrost, proving detection of automatic cache-control injection (`CG002`).
+
+---
+
+## Testing Commands
+
+From within the `plugins/cacheguard` directory:
+
+```bash
+# Run 43 unit and security regression tests
+make test
+
+# Run race condition detector
+make test-race
+
+# Run 3-mode real gateway performance benchmark
+make bench
+
+# Run 7-step reproducible demo
+make demo
+
+# Run live gateway integration test suite
+make integration
+
+# Run comprehensive installer test suite (Tests A through J)
+make test-installer
+```
+
+---
+
 ## Troubleshooting Guide
 
 ### 1. `plugin was built with a different version of package`
@@ -206,10 +268,9 @@ Go plugins require that both the plugin (`.so`) and the host binary (`bifrost-ht
 - The exact same CGO settings (`CGO_ENABLED=1`)
 - Identical shared dependency package versions
 
-**Resolution**: Recompile both from the same workspace:
+**Resolution**: Recompile using the installer pointing to your Bifrost directory:
 ```bash
-make build              # in plugins/cacheguard
-go build -o bifrost-http # in transports/bifrost-http
+make install BIFROST_DIR=/path/to/Bifrost
 ```
 
 ### 2. Missing `X-Cacheguard-*` Response Headers
@@ -222,22 +283,7 @@ By default, `raw_outbound_inspection` is `false` to avoid copying raw outbound b
 
 ---
 
-## Testing Commands
+## License & Attribution
 
-```bash
-# Run unit tests
-cd plugins/cacheguard
-make test
-
-# Run race condition detector
-make test-race
-
-# Run gateway performance benchmark across Modes A, B, and C
-make bench
-
-# Run 7-step reproducible demo
-make demo
-
-# Run live gateway integration test suite
-make integration
-```
+StillMark is distributed under the **Apache-2.0 License**, matching the Bifrost project.  
+Bifrost is an open-source project by Maxim AI Inc. (Apache-2.0).

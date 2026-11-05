@@ -365,6 +365,9 @@ func startDemoGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPa
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
+				"config": map[string]any{
+					"expose_schema_paths": true,
+				},
 			},
 		}
 	}
@@ -453,6 +456,9 @@ func startDemoGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPa
 	)
 	cmd.Dir = filepath.Join(workspaceRoot, "transports", "bifrost-http")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var gatewayOut bytes.Buffer
+	cmd.Stdout = &gatewayOut
+	cmd.Stderr = &gatewayOut
 
 	var env []string
 	for _, e := range os.Environ() {
@@ -489,5 +495,5 @@ func startDemoGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPa
 	}
 
 	cleanup()
-	return nil, nil, fmt.Errorf("gateway health check timed out on port 8081")
+	return nil, nil, fmt.Errorf("gateway health check timed out on port 8081; logs:\n%s", gatewayOut.String())
 }

@@ -32,3 +32,15 @@ demo:
 integration:
 	go run run_integration.go
 
+install:
+	@go run installer.go -action=install -bifrost-dir="$(BIFROST_DIR)" $(if $(CONFIG_PATH),-config-path="$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),-dry-run,)
+
+uninstall:
+	@go run installer.go -action=uninstall -bifrost-dir="$(BIFROST_DIR)" $(if $(CONFIG_PATH),-config-path="$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),-dry-run,)
+
+verify:
+	@go run installer.go -action=verify -bifrost-dir="$(BIFROST_DIR)"
+
+test-installer:
+	go run test_installer.go
+
