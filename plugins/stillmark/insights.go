@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	domainPrefixToolBytes = "cacheguard:tool-bytes:"
+	domainPrefixToolBytes = "stillmark:tool-bytes:"
 	maxRawBodyForBytes    = 4 << 20 // skip byte fingerprinting for bodies over 4 MiB
 
 	autoSessionID      = "auto"
-	domainPrefixTenant = "cacheguard:tenant:"
+	domainPrefixTenant = "stillmark:tenant:"
 	maxReportIssues    = 500
 )
 
@@ -327,7 +327,7 @@ func startReportServer(addr string) {
 		return
 	}
 	if !isLoopbackAddr(addr) {
-		fmt.Printf("[CacheGuard] report_addr %q refused: only loopback addresses are allowed\n", addr)
+		fmt.Printf("[StillMark] report_addr %q refused: only loopback addresses are allowed\n", addr)
 		return
 	}
 	mux := http.NewServeMux()
@@ -335,14 +335,14 @@ func startReportServer(addr string) {
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		fmt.Printf("[CacheGuard] report server not started: %v\n", err)
+		fmt.Printf("[StillMark] report server not started: %v\n", err)
 		return
 	}
 	reportServerMu.Lock()
 	reportServer = srv
 	reportServerMu.Unlock()
 	go func() { _ = srv.Serve(ln) }()
-	fmt.Printf("[CacheGuard] operator report at http://%s/stillmark/report\n", addr)
+	fmt.Printf("[StillMark] operator report at http://%s/stillmark/report\n", addr)
 }
 
 func stopReportServer() {
@@ -358,7 +358,7 @@ func stopReportServer() {
 }
 
 // ---------------------------------------------------------------------------
-// Byte-exact tool serialization (CG011)
+// Byte-exact tool serialization (SM011)
 // ---------------------------------------------------------------------------
 
 // rawPayloadBytes converts a captured request payload into bytes without re-encoding when possible.

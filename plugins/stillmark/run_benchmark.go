@@ -95,7 +95,7 @@ func startGateway(workspaceRoot string, enablePlugin bool, pluginPath, mockBaseU
 	if enablePlugin {
 		pluginsList = []map[string]any{
 			{
-				"name":    "cacheguard",
+				"name":    "stillmark",
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
@@ -134,8 +134,8 @@ func startGateway(workspaceRoot string, enablePlugin bool, pluginPath, mockBaseU
 			"virtual_keys": []map[string]any{
 				{
 					"name":      "Bench Virtual Key",
-					"id":        "vk-cacheguard-bench",
-					"value":     "sk-bf-cacheguard-vk",
+					"id":        "vk-stillmark-bench",
+					"value":     "sk-bf-stillmark-vk",
 					"is_active": true,
 					"provider_configs": []map[string]any{
 						{
@@ -289,7 +289,7 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 	for i := 0; i < 15; i++ {
 		req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
+		req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
@@ -316,7 +316,7 @@ func runBenchmark(name string, totalReqs int, concurrency int, reqBody []byte, h
 			for idx := range workChan {
 				req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBody))
 				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
+				req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
 				for k, v := range headers {
 					req.Header.Set(k, v)
 				}
@@ -397,7 +397,7 @@ func verifyTrackedDiagnosis(reqBody []byte, headers map[string]string) (string, 
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
+	req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -409,9 +409,9 @@ func verifyTrackedDiagnosis(reqBody []byte, headers map[string]string) (string, 
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	diag := resp.Header.Get("X-Cacheguard-Diagnosis")
+	diag := resp.Header.Get("X-Stillmark-Diagnosis")
 	if diag == "" {
-		return "", fmt.Errorf("missing X-Cacheguard-Diagnosis response header")
+		return "", fmt.Errorf("missing X-Stillmark-Diagnosis response header")
 	}
 	return diag, nil
 }
@@ -463,7 +463,7 @@ func minMaxFloat(vals []float64) (float64, float64) {
 
 func main() {
 	fmt.Println("================================================================================")
-	fmt.Println("     BIFROST CACHEGUARD — 5-RUN REPEATED MATCHED BENCHMARK (ALTERNATING)       ")
+	fmt.Println("     BIFROST STILLMARK — 5-RUN REPEATED MATCHED BENCHMARK (ALTERNATING)       ")
 	fmt.Println("================================================================================")
 
 	workspaceRoot, err := filepath.Abs("../..")
@@ -472,11 +472,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	pluginPath := filepath.Join(workspaceRoot, "plugins", "cacheguard", "build", "cacheguard.so")
+	pluginPath := filepath.Join(workspaceRoot, "plugins", "stillmark", "build", "stillmark.so")
 	if _, err := os.Stat(pluginPath); err != nil {
 		fmt.Printf("Compiling plugin first...\n")
 		buildCmd := exec.Command("make", "build")
-		buildCmd.Dir = filepath.Join(workspaceRoot, "plugins", "cacheguard")
+		buildCmd.Dir = filepath.Join(workspaceRoot, "plugins", "stillmark")
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			fmt.Printf("FAIL: Plugin build failed: %v\n%s\n", err, string(out))
 			os.Exit(1)
@@ -500,10 +500,10 @@ func main() {
 
 	headersA := map[string]string{}
 	headersB := map[string]string{
-		"x-cacheguard-session-id": "bench-session-b",
+		"x-stillmark-session-id": "bench-session-b",
 	}
 	headersC := map[string]string{
-		"x-cacheguard-session-id": "bench-session-c",
+		"x-stillmark-session-id": "bench-session-c",
 	}
 
 	pairsA := make([]RepetitionPair, numRepetitions)

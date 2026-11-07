@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -9,10 +10,10 @@ import (
 
 func initKey(t *testing.T) {
 	t.Helper()
-	if err := InitEngine(100, 10, time.Minute); err != nil {
+	// Use the same defaults as TestMain and leave the engine running for other tests.
+	if err := InitEngine(DefaultMaxSessions, DefaultMaxEntries, DefaultSessionTTL); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(CleanupEngine)
 }
 
 func sysReq(system string) *schemas.BifrostChatRequest {
@@ -37,7 +38,7 @@ func TestMaskVolatileValues(t *testing.T) {
 	}
 }
 
-func TestVolatileOnlySystemPromptDriftIsCG009(t *testing.T) {
+func TestVolatileOnlySystemPromptDriftIsSM009(t *testing.T) {
 	initKey(t)
 	p1, m1, _ := ExtractPrefixFingerprints(sysReq("Current time: 2026-11-07 22:41:03\nYou are a support agent."))
 	p2, m2, _ := ExtractPrefixFingerprints(sysReq("Current time: 2026-11-07 22:41:19\nYou are a support agent."))
@@ -54,11 +55,11 @@ func TestVolatileOnlySystemPromptDriftIsCG009(t *testing.T) {
 	}
 	f := BuildDiagnosticFindings(&RequestDiagnostic{Drift: drift})
 	if len(f) != 1 || f[0].Code != CodeVolatileValueInPrefix || f[0].Severity != SeverityWarning {
-		t.Fatalf("expected one CG009 warning, got %+v", f)
+		t.Fatalf("expected one SM009 warning, got %+v", f)
 	}
 }
 
-func TestRealSystemPromptEditIsCG008(t *testing.T) {
+func TestRealSystemPromptEditIsSM008(t *testing.T) {
 	initKey(t)
 	p1, m1, _ := ExtractPrefixFingerprints(sysReq("You are a support agent."))
 	p2, m2, _ := ExtractPrefixFingerprints(sysReq("You are a helpful support agent."))
@@ -69,7 +70,7 @@ func TestRealSystemPromptEditIsCG008(t *testing.T) {
 	}
 	f := BuildDiagnosticFindings(&RequestDiagnostic{Drift: drift})
 	if len(f) != 1 || f[0].Code != CodeSystemPromptChanged {
-		t.Fatalf("expected one CG008 finding, got %+v", f)
+		t.Fatalf("expected one SM008 finding, got %+v", f)
 	}
 }
 
@@ -104,7 +105,7 @@ func tools(names ...string) []schemas.ChatTool {
 	return out
 }
 
-func TestToolReorderIsCG010(t *testing.T) {
+func TestToolReorderIsSM010(t *testing.T) {
 	initKey(t)
 	h1, p1, _ := FlattenToolSchemasWithStatus(tools("get_order", "refund", "search"))
 	h2, p2, _ := FlattenToolSchemasWithStatus(tools("search", "get_order", "refund"))
@@ -115,7 +116,7 @@ func TestToolReorderIsCG010(t *testing.T) {
 	}
 	f := BuildDiagnosticFindings(&RequestDiagnostic{Drift: drift})
 	if len(f) != 1 || f[0].Code != CodeToolsReordered {
-		t.Fatalf("expected one CG010, got %+v", f)
+		t.Fatalf("expected one SM010, got %+v", f)
 	}
 }
 
@@ -206,7 +207,7 @@ func TestToolBytesAttribution(t *testing.T) {
 	}
 	f := BuildDiagnosticFindings(&RequestDiagnostic{Drift: drift, Snapshot: curr})
 	if len(f) != 1 || f[0].Code != CodeToolSerializationChanged || f[0].EvidenceSource != EvidenceGatewayState {
-		t.Fatalf("expected gateway CG011, got %+v", f)
+		t.Fatalf("expected gateway SM011, got %+v", f)
 	}
 
 	curr.ClientToolsRawHMAC = "c2"
@@ -220,5 +221,29 @@ func TestToolBytesAttribution(t *testing.T) {
 	curr.OutboundToolsRawHMAC = "o1"
 	if d := CompareSnapshots(prev, curr); d.Detected {
 		t.Fatalf("identical bytes must not drift, got %+v", d)
+	}
+}
+
+func TestOutboundAnthropicSystemAndTools(t *testing.T) {
+	initKey(t)
+	body := func(system, desc string) []byte {
+		return []byte(`{"model":"claude","system":[{"type":"text","text":"` + system + `"}],` +
+			`"tools":[{"name":"get_order","description":"` + desc + `","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}}],` +
+			`"messages":[{"role":"user","content":"hi"}]}`)
+	}
+	_, p1, t1, paths1, n, _, _ := ParseOutboundPayload(json.RawMessage(body("You are a support agent.", "Look up an order.")))
+	_, p2, t2, _, _, _, _ := ParseOutboundPayload(json.RawMessage(body("You are a helpful support agent.", "Look up an order.")))
+	_, p3, t3, paths3, _, _, _ := ParseOutboundPayload(json.RawMessage(body("You are a support agent.", "Look up a customer order.")))
+	if p1 == "" || t1 == "" || n != 1 {
+		t.Fatalf("expected Anthropic system and tools to be fingerprinted, got prefix=%q tools=%q n=%d", p1, t1, n)
+	}
+	if p1 == p2 || t1 != t2 {
+		t.Fatal("system prompt change must change only the prefix fingerprint")
+	}
+	if p1 != p3 || t1 == t3 {
+		t.Fatal("tool description change must change only the tools fingerprint")
+	}
+	if path, _ := findFirstPathDiff(paths1, paths3); path != "tools[0].description" {
+		t.Fatalf("expected tools[0].description, got %q", path)
 	}
 }

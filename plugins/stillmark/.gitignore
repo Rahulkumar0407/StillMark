@@ -1,4 +1,4 @@
-# CacheGuard build artifacts and temporary test data
+# StillMark build artifacts and temporary test data
 build/
 .test_data/
 .demo_data/

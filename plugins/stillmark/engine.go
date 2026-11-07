@@ -18,16 +18,16 @@ import (
 )
 
 const (
-	domainPrefixPrompt     = "cacheguard:prompt:"
-	domainPrefixMasked     = "cacheguard:prompt-masked:"
-	domainPrefixTool       = "cacheguard:tool:"
-	domainPrefixSchemaPath = "cacheguard:schema-path:"
+	domainPrefixPrompt     = "stillmark:prompt:"
+	domainPrefixMasked     = "stillmark:prompt-masked:"
+	domainPrefixTool       = "stillmark:tool:"
+	domainPrefixSchemaPath = "stillmark:schema-path:"
 
 	DefaultMaxSessions = 10000
 	DefaultMaxEntries  = 10
 	DefaultSessionTTL  = 30 * time.Minute
 
-	headerSessionID = "x-cacheguard-session-id"
+	headerSessionID = "x-stillmark-session-id"
 )
 
 // AttributionType classifies the verified origin of request differences across requests.
@@ -95,23 +95,23 @@ const (
 
 // Stable diagnostic codes.
 const (
-	CodeToolSchemaChanged               = "CG001"
-	CodeGatewayBreakpointInjected       = "CG002"
-	CodeStableMissUnknownCause          = "CG003"
-	CodeOutboundVerificationUnavailable = "CG004"
-	CodeProviderOrModelChanged          = "CG005"
-	CodeMultiMarkerConfigObserved       = "CG006"
-	CodeGatewayBreakpointClamped        = "CG007"
-	CodeSystemPromptChanged             = "CG008"
-	CodeVolatileValueInPrefix           = "CG009"
-	CodeToolsReordered                  = "CG010"
-	CodeToolSerializationChanged        = "CG011"
+	CodeToolSchemaChanged               = "SM001"
+	CodeGatewayBreakpointInjected       = "SM002"
+	CodeStableMissUnknownCause          = "SM003"
+	CodeOutboundVerificationUnavailable = "SM004"
+	CodeProviderOrModelChanged          = "SM005"
+	CodeMultiMarkerConfigObserved       = "SM006"
+	CodeGatewayBreakpointClamped        = "SM007"
+	CodeSystemPromptChanged             = "SM008"
+	CodeVolatileValueInPrefix           = "SM009"
+	CodeToolsReordered                  = "SM010"
+	CodeToolSerializationChanged        = "SM011"
 )
 
 // DiagnosticFinding represents a human-readable, privacy-safe operator finding.
 // Free of sensitive prompt content, user secrets, or unhashed identifiers.
 type DiagnosticFinding struct {
-	Code               string             `json:"code"`                // e.g. "CG001"
+	Code               string             `json:"code"`                // e.g. "SM001"
 	Severity           DiagnosticSeverity `json:"severity"`            // "info", "warning", "error"
 	Component          string             `json:"component"`           // "tools", "cache_control", "system_prompt", etc.
 	Path               string             `json:"path,omitempty"`      // Sanitized JSON path
@@ -122,7 +122,7 @@ type DiagnosticFinding struct {
 	OutboundObservable bool               `json:"outbound_observable"` // Whether provider-bound payload was inspected
 }
 
-// PluginConfig defines operator configuration for CacheGuard.
+// PluginConfig defines operator configuration for StillMark.
 type PluginConfig struct {
 	Enabled               bool   `json:"enabled"`
 	DiagnosticLogging     bool   `json:"diagnostic_logging"`
@@ -138,7 +138,7 @@ type PluginConfig struct {
 	InputPricePerMTok       float64 `json:"input_price_per_mtok"`        // default: 3.00
 	CachedInputPricePerMTok float64 `json:"cached_input_price_per_mtok"` // default: 0.30
 
-	// AutoSession tracks requests without an X-Cacheguard-Session-Id header, grouped by
+	// AutoSession tracks requests without an X-Stillmark-Session-Id header, grouped by
 	// authenticated tenant + provider + model, so no client changes are needed. default: true
 	AutoSession bool `json:"auto_session"`
 	// ReportAddr serves the operator report (GET /stillmark/report) on this loopback address,
@@ -846,7 +846,7 @@ func DetectTransformation(snap RequestSnapshot, provider, model string) Transfor
 	// OpenRouter prompt-caching check:
 	// OpenRouter official documentation confirms multiple cache-control breakpoints are allowed for Gemini,
 	// with only the final breakpoint used as the prompt-cache prefix.
-	// We classify this as an informative configuration observation (CG006), not a proven billing bug.
+	// We classify this as an informative configuration observation (SM006), not a proven billing bug.
 	if snap.ClientCacheMarkerCount > 1 && strings.EqualFold(provider, "openrouter") {
 		firstPath := ""
 		if len(snap.ClientMarkerPaths) > 0 {
@@ -916,7 +916,8 @@ func ParseOutboundPayload(raw any) (bool, string, string, map[string]string, int
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
-		Tools []schemas.ChatTool `json:"tools"`
+		System json.RawMessage   `json:"system"` // Anthropic Messages format: top-level system prompt
+		Tools  []json.RawMessage `json:"tools"`  // any provider format (OpenAI function / Anthropic input_schema)
 	}
 
 	if err := json.Unmarshal(rawBytes, &payload); err != nil {
@@ -935,11 +936,19 @@ func ParseOutboundPayload(raw any) (bool, string, string, map[string]string, int
 			break
 		}
 	}
+	if prefixHMAC == "" && len(payload.System) > 0 && string(payload.System) != "null" {
+		var strSystem string
+		if err := json.Unmarshal(payload.System, &strSystem); err == nil && strSystem != "" {
+			prefixHMAC = computeHMAC(domainPrefixPrompt, []byte(strSystem))
+		} else {
+			prefixHMAC = computeHMAC(domainPrefixPrompt, payload.System)
+		}
+	}
 
 	var toolsHMAC string
 	var pathHMACs map[string]string
 	if len(payload.Tools) > 0 {
-		toolsHMAC, pathHMACs = FlattenToolSchemas(payload.Tools)
+		toolsHMAC, pathHMACs = FlattenOutboundTools(payload.Tools)
 	}
 
 	return true, prefixHMAC, toolsHMAC, pathHMACs, len(payload.Tools), markerCount, markerPaths
@@ -1094,6 +1103,40 @@ func CompareSnapshots(prev, curr RequestSnapshot) DriftResult {
 		Confirmed:   false,
 		Reason:      "Request structure is identical across client input and outbound provider request",
 	}
+}
+
+// FlattenOutboundTools fingerprints provider-bound tools in any provider format by flattening each
+// tool object generically (e.g. tools[0].function.parameters... or tools[0].input_schema...).
+// Outbound snapshots are only compared with other outbound snapshots, so the path layout only
+// needs to be consistent with itself.
+func FlattenOutboundTools(tools []json.RawMessage) (string, map[string]string) {
+	pathHMACs := make(map[string]string)
+	for i, raw := range tools {
+		if len(pathHMACs) >= maxFlattenedPaths {
+			break
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			continue
+		}
+		flattenJSONMap(fmt.Sprintf("tools[%d]", i), m, pathHMACs, 0)
+	}
+	if len(pathHMACs) == 0 {
+		return "", pathHMACs
+	}
+	keys := make([]string, 0, len(pathHMACs))
+	for k := range pathHMACs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var combined strings.Builder
+	for _, k := range keys {
+		combined.WriteString(k)
+		combined.WriteString("=")
+		combined.WriteString(pathHMACs[k])
+		combined.WriteString(";")
+	}
+	return computeHMAC(domainPrefixTool, []byte(combined.String())), pathHMACs
 }
 
 // findFirstPathDiff finds the first alphabetical path that was added, removed, or modified.
@@ -1350,7 +1393,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 	var findings []DiagnosticFinding
 	outboundObservable := diag.Snapshot.OutboundObservable
 
-	// 1. Tool Schema Changed (CG001)
+	// 1. Tool Schema Changed (SM001)
 	if diag.Drift.Detected && diag.Drift.Component == "tools" && diag.Drift.ChangeType == "reordered" {
 		source := EvidenceClientInput
 		if diag.Drift.Attribution == AttributionGatewayOutputChanged {
@@ -1409,7 +1452,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 1b. System prompt changed (CG008), or changed only by a dynamic value (CG009)
+	// 1b. System prompt changed (SM008), or changed only by a dynamic value (SM009)
 	if diag.Drift.Detected && diag.Drift.Component == "system_prompt" {
 		source := EvidenceClientInput
 		if diag.Drift.Attribution == AttributionGatewayOutputChanged {
@@ -1434,7 +1477,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		findings = append(findings, f)
 	}
 
-	// 2. Gateway Added a Cache Breakpoint (CG002)
+	// 2. Gateway Added a Cache Breakpoint (SM002)
 	if diag.Transformation.Type == TransformationCacheControlInjected {
 		cleanPath := SanitizeFieldPath(diag.Transformation.Path)
 		findings = append(findings, DiagnosticFinding{
@@ -1450,7 +1493,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 3. Gateway Clamped Cache Breakpoints (CG007)
+	// 3. Gateway Clamped Cache Breakpoints (SM007)
 	if diag.Transformation.Type == TransformationCacheControlClamped {
 		cleanPath := SanitizeFieldPath(diag.Transformation.Path)
 		findings = append(findings, DiagnosticFinding{
@@ -1466,7 +1509,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 4. Multi-marker configuration observed (CG006)
+	// 4. Multi-marker configuration observed (SM006)
 	if diag.Transformation.Type == TransformationMultiMarkerObserved {
 		cleanPath := SanitizeFieldPath(diag.Transformation.Path)
 		findings = append(findings, DiagnosticFinding{
@@ -1482,7 +1525,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 5. Stable request, no reported cached tokens (CG003)
+	// 5. Stable request, no reported cached tokens (SM003)
 	// Requires both usage metadata and explicit prompt token details.
 	// Because Bifrost's Go schema ChatPromptTokensDetails normalizes absent cached read tokens
 	// to zero (int), an explicit zero cannot be distinguished with certainty from an omitted metric.
@@ -1500,7 +1543,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 6. Provider or model changed within session (CG005)
+	// 6. Provider or model changed within session (SM005)
 	if diag.DomainChanged {
 		findings = append(findings, DiagnosticFinding{
 			Code:               CodeProviderOrModelChanged,
@@ -1515,7 +1558,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 		})
 	}
 
-	// 7. Outbound verification unavailable (CG004)
+	// 7. Outbound verification unavailable (SM004)
 	// Only emitted when relevant to an unverified attribution (diag.Attribution == AttributionOriginUnverified)
 	// to avoid noisy warnings on routine requests where outbound verification was not required.
 	if diag.SessionID != "" && !outboundObservable && diag.Attribution == AttributionOriginUnverified {
@@ -1526,7 +1569,7 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 			Path:               "",
 			EvidenceSource:     EvidenceGatewayState,
 			Confidence:         ConfidenceObserved,
-			Message:            "CacheGuard cannot determine whether provider-bound content changed because outbound inspection is disabled.",
+			Message:            "StillMark cannot determine whether provider-bound content changed because outbound inspection is disabled.",
 			SuggestedAction:    "Use the isolated diagnostic workflow with synthetic requests to inspect outbound transformations.",
 			OutboundObservable: false,
 		})

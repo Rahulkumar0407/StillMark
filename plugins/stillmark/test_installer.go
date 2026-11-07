@@ -29,6 +29,11 @@ func main() {
 		fmt.Printf("FAIL: Cannot create isolated temp dir: %v\n", err)
 		os.Exit(1)
 	}
+	// macOS temp dirs live under /var, a symlink to /private/var. The installer refuses to operate
+	// through symlinks, so use the resolved path.
+	if resolved, rerr := filepath.EvalSymlinks(tempTestRoot); rerr == nil {
+		tempTestRoot = resolved
+	}
 	defer func() {
 		_ = os.RemoveAll(tempTestRoot)
 		fmt.Printf("\n✓ Cleaned up isolated test environment: %s\n", tempTestRoot)
@@ -41,7 +46,7 @@ func main() {
 	_ = os.MkdirAll(disposableBuildDir, 0755)
 
 	// Record original dev plugin binary stats to assert it was never modified or deleted
-	devSO := filepath.Join(realWorkspaceRoot, "plugins", "cacheguard", "build", "cacheguard.so")
+	devSO := filepath.Join(realWorkspaceRoot, "plugins", "stillmark", "build", "stillmark.so")
 	devSOStatBefore, _ := os.Stat(devSO)
 
 	// -------------------------------------------------------------------------
@@ -200,7 +205,7 @@ func main() {
 	_ = json.Unmarshal(test5AfterBytes, &test5AfterDoc)
 	pList5, _ := test5AfterDoc["plugins"].([]any)
 	if len(pList5) != 3 {
-		fmt.Printf("FAIL Test 5: Expected 3 plugins (alpha, beta, cacheguard), got %d\n", len(pList5))
+		fmt.Printf("FAIL Test 5: Expected 3 plugins (alpha, beta, stillmark), got %d\n", len(pList5))
 		os.Exit(1)
 	}
 	var hasAlpha, hasBeta, hasCG bool
@@ -212,7 +217,7 @@ func main() {
 		if m["name"] == "plugin-beta" {
 			hasBeta = true
 		}
-		if m["name"] == "cacheguard" {
+		if m["name"] == "stillmark" {
 			hasCG = true
 		}
 	}
@@ -226,10 +231,10 @@ func main() {
 	// TEST 6: Repeated Installation (Idempotency & Custom Config Preservation)
 	// -------------------------------------------------------------------------
 	fmt.Println("\n[TEST 6] Repeated Installation & Custom Config Preservation...")
-	// Customize cacheguard config with custom operator values
+	// Customize stillmark config with custom operator values
 	for i, item := range pList5 {
 		m := item.(map[string]any)
-		if m["name"] == "cacheguard" {
+		if m["name"] == "stillmark" {
 			cfg := m["config"].(map[string]any)
 			cfg["max_sessions"] = 4200
 			cfg["session_ttl"] = "45m"
@@ -265,7 +270,7 @@ func main() {
 	var preservedMaxSessions bool
 	for _, item := range pList6 {
 		m := item.(map[string]any)
-		if m["name"] == "cacheguard" {
+		if m["name"] == "stillmark" {
 			if cfg, ok := m["config"].(map[string]any); ok {
 				if v, ok := cfg["max_sessions"].(float64); ok && int(v) == 4200 {
 					preservedMaxSessions = true
@@ -284,7 +289,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	fmt.Println("\n[TEST 7] Transactional Uninstall...")
 	// Verify mock binary exists before uninstall
-	mockSO := filepath.Join(disposableBuildDir, "cacheguard.so")
+	mockSO := filepath.Join(disposableBuildDir, "stillmark.so")
 	if _, err := os.Stat(mockSO); err != nil {
 		fmt.Printf("FAIL Test 7: Mock SO missing before uninstall: %v\n", err)
 		os.Exit(1)
@@ -317,8 +322,8 @@ func main() {
 	}
 	for _, item := range pList7 {
 		m := item.(map[string]any)
-		if m["name"] == "cacheguard" {
-			fmt.Printf("FAIL Test 7: cacheguard still in plugins list!\n")
+		if m["name"] == "stillmark" {
+			fmt.Printf("FAIL Test 7: stillmark still in plugins list!\n")
 			os.Exit(1)
 		}
 	}

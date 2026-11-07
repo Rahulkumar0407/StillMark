@@ -71,7 +71,7 @@ func createMockProviderServer(capture *MockProviderCapture) *httptest.Server {
 		capture.Record(body)
 
 		response := map[string]any{
-			"id":      "chatcmpl-mock-cacheguard",
+			"id":      "chatcmpl-mock-stillmark",
 			"object":  "chat.completion",
 			"created": time.Now().Unix(),
 			"model":   "mock-gpt-4o",
@@ -101,11 +101,11 @@ func createMockProviderServer(capture *MockProviderCapture) *httptest.Server {
 	}))
 }
 
-// TestPluginDynamicLoading verifies loading cacheguard.so through Bifrost loader.
+// TestPluginDynamicLoading verifies loading stillmark.so through Bifrost loader.
 func TestPluginDynamicLoading(t *testing.T) {
-	pluginPath, err := filepath.Abs("build/cacheguard.so")
+	pluginPath, err := filepath.Abs("build/stillmark.so")
 	require.NoError(t, err)
-	require.FileExists(t, pluginPath, "cacheguard.so must exist before running test")
+	require.FileExists(t, pluginPath, "stillmark.so must exist before running test")
 
 	loader := &frameworkPlugins.SharedObjectPluginLoader{}
 
@@ -405,7 +405,7 @@ func TestKeyRotationOnNewPluginInstance(t *testing.T) {
 }
 
 // TestSessionValidation verifies Task 3:
-// Format and length validation for X-CacheGuard-Session-ID.
+// Format and length validation for X-StillMark-Session-ID.
 func TestSessionValidation(t *testing.T) {
 	// Valid IDs
 	assert.True(t, ValidateSessionID("session_12345"))
@@ -811,7 +811,7 @@ func createMockToolWithNestedSchema(nodeIDType string) schemas.ChatTool {
 
 func TestAttribution_ClientInputChanged(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Turn 1: Client sends string node_id
 	tool1 := createMockToolWithNestedSchema("string")
@@ -858,7 +858,7 @@ func TestAttribution_ClientInputChanged(t *testing.T) {
 
 func TestAttribution_GatewayOutputChanged(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Both turns have identical incoming client tool definitions
 	clientTool := createMockToolWithNestedSchema("string")
@@ -914,7 +914,7 @@ func TestAttribution_GatewayOutputChanged(t *testing.T) {
 
 func TestAttribution_OriginUnverifiedWhenRawCaptureDisabled(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Both turns have identical client input
 	clientTool := createMockToolWithNestedSchema("string")
@@ -949,7 +949,7 @@ func TestAttribution_OriginUnverifiedWhenRawCaptureDisabled(t *testing.T) {
 
 func TestAttribution_StableInputAndOutput(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	tool := createMockToolWithNestedSchema("string")
 	toolsHMAC, paths := FlattenToolSchemas([]schemas.ChatTool{tool})
@@ -979,7 +979,7 @@ func TestAttribution_StableInputAndOutput(t *testing.T) {
 
 func TestAttribution_ProviderOrModelChangeDetection(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	ctx1 := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
 	ctx1.SetValue(ctxSessionKey, "session-domain-switch-test")
@@ -1122,7 +1122,7 @@ func TestTransformation_Issue9416_OpenRouterGeminiMultiMarker(t *testing.T) {
 	assert.False(t, finding.WarrantsReview, "multi-marker on OpenRouter+Gemini is officially supported (final marker used as prefix)")
 	assert.Contains(t, finding.Summary, "final marker as the prompt-cache prefix")
 
-	// Verify diagnostic model generation maps this to CG006 info
+	// Verify diagnostic model generation maps this to SM006 info
 	diag := &RequestDiagnostic{
 		Provider:       "openrouter",
 		Model:          "google/gemini-2.5-pro",
@@ -1131,16 +1131,16 @@ func TestTransformation_Issue9416_OpenRouterGeminiMultiMarker(t *testing.T) {
 	}
 	findings := BuildDiagnosticFindings(diag)
 	require.NotEmpty(t, findings)
-	var foundCG006 bool
+	var foundSM006 bool
 	for _, f := range findings {
 		if f.Code == CodeMultiMarkerConfigObserved {
-			foundCG006 = true
+			foundSM006 = true
 			assert.Equal(t, SeverityInfo, f.Severity)
 			assert.Equal(t, ConfidenceObserved, f.Confidence)
 			assert.Contains(t, f.SuggestedAction, "Verify that the final breakpoint corresponds to your intended static prompt prefix")
 		}
 	}
-	assert.True(t, foundCG006, "expected CG006 diagnostic finding")
+	assert.True(t, foundSM006, "expected SM006 diagnostic finding")
 }
 
 func TestTransformation_SensitiveDataRedaction(t *testing.T) {
@@ -1173,7 +1173,7 @@ func TestTransformation_SensitiveDataRedaction(t *testing.T) {
 
 func TestAttribution_GatewayInjectionDoesNotTriggerFalseDrift(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Turn 1 and Turn 2 both have identical client inputs, and Bifrost consistently
 	// injects the cache breakpoint on both.
@@ -1221,16 +1221,16 @@ func TestFindingRateLimiter(t *testing.T) {
 	now := time.Now()
 
 	// First event should be allowed
-	assert.True(t, limiter.ShouldLog("tenant1|CG001|tools[0]", now))
+	assert.True(t, limiter.ShouldLog("tenant1|SM001|tools[0]", now))
 
 	// Repeated identical warning within cooldown must be suppressed
-	assert.False(t, limiter.ShouldLog("tenant1|CG001|tools[0]", now.Add(10*time.Millisecond)))
+	assert.False(t, limiter.ShouldLog("tenant1|SM001|tools[0]", now.Add(10*time.Millisecond)))
 
 	// Different scope key should be allowed
-	assert.True(t, limiter.ShouldLog("tenant2|CG001|tools[0]", now.Add(20*time.Millisecond)))
+	assert.True(t, limiter.ShouldLog("tenant2|SM001|tools[0]", now.Add(20*time.Millisecond)))
 
 	// After cooldown, should be allowed again
-	assert.True(t, limiter.ShouldLog("tenant1|CG001|tools[0]", now.Add(150*time.Millisecond)))
+	assert.True(t, limiter.ShouldLog("tenant1|SM001|tools[0]", now.Add(150*time.Millisecond)))
 }
 
 func TestValidateAndApplyConfig(t *testing.T) {
@@ -1274,7 +1274,7 @@ func TestValidateAndApplyConfig(t *testing.T) {
 	assert.Equal(t, "info", cfgClamped.SeverityThreshold)
 }
 
-// Scenario A: Tool schema changed -> Clear diagnostic with safe field path (CG001)
+// Scenario A: Tool schema changed -> Clear diagnostic with safe field path (SM001)
 func TestScenarioA_ToolSchemaChangedDiagnostic(t *testing.T) {
 	diag := &RequestDiagnostic{
 		SessionID: "sess-operator-a",
@@ -1302,7 +1302,7 @@ func TestScenarioA_ToolSchemaChangedDiagnostic(t *testing.T) {
 	assert.Contains(t, f.SuggestedAction, "Keep shared tool definitions consistent")
 }
 
-// Scenario B: Stable request with zero cached tokens -> Unknown-cause guidance, not a false eviction claim (CG003)
+// Scenario B: Stable request with zero cached tokens -> Unknown-cause guidance, not a false eviction claim (SM003)
 func TestScenarioB_StableMissUnknownCause(t *testing.T) {
 	diag := &RequestDiagnostic{
 		SessionID:        "sess-operator-b",
@@ -1317,10 +1317,10 @@ func TestScenarioB_StableMissUnknownCause(t *testing.T) {
 	}
 	findings := BuildDiagnosticFindings(diag)
 	require.NotEmpty(t, findings)
-	var foundCG003 bool
+	var foundSM003 bool
 	for _, f := range findings {
 		if f.Code == CodeStableMissUnknownCause {
-			foundCG003 = true
+			foundSM003 = true
 			assert.Equal(t, SeverityInfo, f.Severity)
 			assert.Equal(t, EvidenceProviderUsage, f.EvidenceSource)
 			assert.Equal(t, ConfidenceObserved, f.Confidence)
@@ -1328,10 +1328,10 @@ func TestScenarioB_StableMissUnknownCause(t *testing.T) {
 			assert.Contains(t, f.SuggestedAction, "Check provider cache eligibility, minimum prompt length, TTL, routing")
 		}
 	}
-	assert.True(t, foundCG003)
+	assert.True(t, foundSM003)
 }
 
-// Scenario C: Bifrost injects a cache-control marker -> Verified transformation finding (CG002)
+// Scenario C: Bifrost injects a cache-control marker -> Verified transformation finding (SM002)
 func TestScenarioC_GatewayBreakpointInjected(t *testing.T) {
 	diag := &RequestDiagnostic{
 		SessionID: "sess-operator-c",
@@ -1348,22 +1348,22 @@ func TestScenarioC_GatewayBreakpointInjected(t *testing.T) {
 	}
 	findings := BuildDiagnosticFindings(diag)
 	require.NotEmpty(t, findings)
-	var foundCG002 bool
+	var foundSM002 bool
 	for _, f := range findings {
 		if f.Code == CodeGatewayBreakpointInjected {
-			foundCG002 = true
+			foundSM002 = true
 			assert.Equal(t, SeverityInfo, f.Severity)
 			assert.Equal(t, EvidenceGatewayState, f.EvidenceSource)
 			assert.Equal(t, ConfidenceConfirmed, f.Confidence)
 			assert.Contains(t, f.Message, "Bifrost inserted a cache-control marker")
 		}
 	}
-	assert.True(t, foundCG002)
+	assert.True(t, foundSM002)
 }
 
-// Scenario E: Outbound capture disabled -> Explicit verification limitation (CG004)
+// Scenario E: Outbound capture disabled -> Explicit verification limitation (SM004)
 func TestScenarioE_OutboundCaptureDisabledLimitation(t *testing.T) {
-	// Case 1: Unverified attribution with outbound capture disabled emits CG004
+	// Case 1: Unverified attribution with outbound capture disabled emits SM004
 	diagUnverified := &RequestDiagnostic{
 		SessionID:   "sess-operator-e",
 		TenantID:    "customer:cust-1",
@@ -1374,19 +1374,19 @@ func TestScenarioE_OutboundCaptureDisabledLimitation(t *testing.T) {
 	}
 	findings := BuildDiagnosticFindings(diagUnverified)
 	require.NotEmpty(t, findings)
-	var foundCG004 bool
+	var foundSM004 bool
 	for _, f := range findings {
 		if f.Code == CodeOutboundVerificationUnavailable {
-			foundCG004 = true
+			foundSM004 = true
 			assert.Equal(t, SeverityInfo, f.Severity)
 			assert.False(t, f.OutboundObservable)
-			assert.Contains(t, f.Message, "CacheGuard cannot determine whether provider-bound content changed")
+			assert.Contains(t, f.Message, "StillMark cannot determine whether provider-bound content changed")
 			assert.Contains(t, f.SuggestedAction, "Use the isolated diagnostic workflow with synthetic requests")
 		}
 	}
-	assert.True(t, foundCG004)
+	assert.True(t, foundSM004)
 
-	// Case 2: Routine request with AttributionNone does NOT emit noisy CG004
+	// Case 2: Routine request with AttributionNone does NOT emit noisy SM004
 	diagRoutine := &RequestDiagnostic{
 		SessionID:   "sess-operator-e",
 		TenantID:    "customer:cust-1",
@@ -1398,14 +1398,14 @@ func TestScenarioE_OutboundCaptureDisabledLimitation(t *testing.T) {
 	}
 	findingsRoutine := BuildDiagnosticFindings(diagRoutine)
 	for _, f := range findingsRoutine {
-		assert.NotEqual(t, CodeOutboundVerificationUnavailable, f.Code, "CG004 must not pollute routine requests")
+		assert.NotEqual(t, CodeOutboundVerificationUnavailable, f.Code, "SM004 must not pollute routine requests")
 	}
 }
 
 // Scenario F: No session ID -> Requests operate normally without cross-request comparison
 func TestScenarioF_NoSessionIDNormalOperation(t *testing.T) {
 	Init(PluginConfig{Enabled: true})
-	defer Cleanup()
+	defer resetPlugin()
 
 	ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(5*time.Second))
 	strVal := "hello"
@@ -1438,7 +1438,7 @@ func TestScenarioH_And_I_ConfigAndDisabledPlugin(t *testing.T) {
 	err := Init("broken-non-json-config")
 	assert.NoError(t, err, "Init must fail-open on invalid config")
 	assert.True(t, isPluginEnabled(), "falls back to default enabled config")
-	Cleanup()
+	resetPlugin()
 
 	// 2. Disabled plugin passes through all hooks untouched
 	err = Init(PluginConfig{Enabled: false})
@@ -1468,7 +1468,7 @@ func TestScenarioH_And_I_ConfigAndDisabledPlugin(t *testing.T) {
 	assert.Nil(t, postErr)
 	assert.Equal(t, resp, postResp)
 
-	Cleanup()
+	resetPlugin()
 }
 
 // ============================================================================
@@ -1477,7 +1477,7 @@ func TestScenarioH_And_I_ConfigAndDisabledPlugin(t *testing.T) {
 
 func BenchmarkComputeHMAC(b *testing.B) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	data := []byte("You are an expert coding assistant specializing in prompt-caching gateways.")
 	b.ResetTimer()
@@ -1489,7 +1489,7 @@ func BenchmarkComputeHMAC(b *testing.B) {
 
 func BenchmarkFlattenToolSchemas(b *testing.B) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	desc := "Fetches weather information"
 	var params schemas.ToolFunctionParameters
@@ -1538,7 +1538,7 @@ func BenchmarkSessionTrackerLookup(b *testing.B) {
 
 func BenchmarkDiagnosticEvaluation(b *testing.B) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	diag := &RequestDiagnostic{
 		SessionID: "sess-bench-1",
@@ -1577,7 +1577,7 @@ func BenchmarkDiagnosticEvaluation(b *testing.B) {
 
 func TestSecurity_DeeplyNestedSchemaRecursionBound(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Build a 50-level deeply nested map to simulate algorithmic stack overflow attempt
 	root := make(map[string]any)
@@ -1613,7 +1613,7 @@ func TestSecurity_DeeplyNestedSchemaRecursionBound(t *testing.T) {
 
 func TestSecurity_LargeSchemaPathCountBound(t *testing.T) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Build a schema with 1,000 distinct properties
 	props := make(map[string]any)
@@ -1649,7 +1649,7 @@ func TestSecurity_LargeSchemaPathCountBound(t *testing.T) {
 
 func TestSecurity_HookPanicRecoveryFailOpen(t *testing.T) {
 	Init(PluginConfig{Enabled: true})
-	defer Cleanup()
+	defer resetPlugin()
 
 	// Passing nil pointers or weird structures must fail-open without panicking
 	assert.NotPanics(t, func() {
@@ -1679,7 +1679,7 @@ func TestSecurity_HookPanicRecoveryFailOpen(t *testing.T) {
 
 func TestCorrectness_MultiTurnConversationGrowthPreservesCachePrefix(t *testing.T) {
 	Init(PluginConfig{Enabled: true})
-	defer Cleanup()
+	defer resetPlugin()
 
 	sessID := "sess-multiturn-grow"
 
@@ -1760,7 +1760,7 @@ func TestCorrectness_MultiTurnConversationGrowthPreservesCachePrefix(t *testing.
 
 func TestCorrectness_MultiTurnConversationPrefixMutationDetectsDrift(t *testing.T) {
 	Init(PluginConfig{Enabled: true})
-	defer Cleanup()
+	defer resetPlugin()
 
 	sessID := "sess-multiturn-mutate"
 
@@ -1819,11 +1819,11 @@ func TestCorrectness_MultiTurnConversationPrefixMutationDetectsDrift(t *testing.
 	assert.Equal(t, DiagnosisConfirmedDrift, diag2.Diagnosis)
 }
 
-// TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitCG003 verifies that when a provider returns
-// an error, the failed turn does NOT overwrite session history in tracker and does NOT emit false CG003 warnings.
-func TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitCG003(t *testing.T) {
+// TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitSM003 verifies that when a provider returns
+// an error, the failed turn does NOT overwrite session history in tracker and does NOT emit false SM003 warnings.
+func TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitSM003(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	sessID := "sess-error-guard-01"
 	custID := "cust-err-test"
@@ -1898,19 +1898,19 @@ func TestHandling_ProviderErrorDoesNotCommitSnapshotOrEmitCG003(t *testing.T) {
 	require.True(t, exists)
 	assert.Equal(t, snap1.PrefixHMAC, snapAfterErr.PrefixHMAC, "tracker snapshot must not be replaced by a failed request")
 
-	// Verify that CG003 was NOT emitted on error
+	// Verify that SM003 was NOT emitted on error
 	diag2, ok := GetRequestDiagnostic(ctx2)
 	require.True(t, ok)
 	for _, f := range diag2.Findings {
-		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "failed request must never emit CG003")
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "failed request must never emit SM003")
 	}
 }
 
-// TestHandling_MissingUsageDoesNotEmitCG003 verifies that when a provider does not report
-// token usage (e.g. usage block is nil), CacheGuard does not falsely diagnose a stable_miss.
-func TestHandling_MissingUsageDoesNotEmitCG003(t *testing.T) {
+// TestHandling_MissingUsageDoesNotEmitSM003 verifies that when a provider does not report
+// token usage (e.g. usage block is nil), StillMark does not falsely diagnose a stable_miss.
+func TestHandling_MissingUsageDoesNotEmitSM003(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	sessID := "sess-no-usage-01"
 	custID := "cust-no-usage"
@@ -1969,7 +1969,7 @@ func TestHandling_MissingUsageDoesNotEmitCG003(t *testing.T) {
 	assert.NotEqual(t, DiagnosisStableMiss, diag2.Diagnosis, "absent usage must not be labeled stable_miss")
 
 	for _, f := range diag2.Findings {
-		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing usage metadata must not emit CG003")
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing usage metadata must not emit SM003")
 	}
 }
 
@@ -2045,7 +2045,7 @@ func TestSessionDomainTracker_ConcurrentAdversarialLoad(t *testing.T) {
 
 func TestFingerprint_MultipleSystemAndDeveloperMessages(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	sys1 := "You are a helpful assistant."
 	sys2 := "Always respond concisely."
@@ -2090,7 +2090,7 @@ func TestFingerprint_MultipleSystemAndDeveloperMessages(t *testing.T) {
 
 func TestFingerprint_MultimodalContent(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	imgURL1 := "https://example.com/image1.png"
 	imgURL2 := "https://example.com/image2.png"
@@ -2136,7 +2136,7 @@ func TestFingerprint_MultimodalContent(t *testing.T) {
 
 func TestFingerprint_OversizedToolDescriptionSetsIncomplete(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	hugeDesc := strings.Repeat("A", 2500) // Exceeds 2048 bytes
 	var params schemas.ToolFunctionParameters
@@ -2176,7 +2176,7 @@ func TestFingerprint_OversizedToolDescriptionSetsIncomplete(t *testing.T) {
 
 func TestFingerprint_LargeSchemaPathLimitSetsIncomplete(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	props := make(map[string]any)
 	for i := 0; i < 550; i++ {
@@ -2209,7 +2209,7 @@ func TestFingerprint_LargeSchemaPathLimitSetsIncomplete(t *testing.T) {
 
 func TestCacheMetric_MissingPromptTokensDetailsDoesNotEmitStableMiss(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	sessID := "sess-details-nil-01"
 	custID := "cust-details-nil"
@@ -2274,15 +2274,15 @@ func TestCacheMetric_MissingPromptTokensDetailsDoesNotEmitStableMiss(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, DiagnosisUsageUnavailable, diagPost.Diagnosis, "missing PromptTokensDetails must result in usage_unavailable, NOT stable_miss")
 
-	// Verify CG003 is NOT emitted
+	// Verify SM003 is NOT emitted
 	for _, f := range diagPost.Findings {
-		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing PromptTokensDetails must not emit CG003")
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "missing PromptTokensDetails must not emit SM003")
 	}
 }
 
 func TestCacheMetric_ResolvesHitAndMissWhenDetailsPresent(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Hit case
 	diagHit := &RequestDiagnostic{
@@ -2360,15 +2360,15 @@ func TestPrivacy_HeadersOmitSensitiveFields(t *testing.T) {
 	require.NoError(t, err)
 
 	// Sensitive fields must be omitted
-	assert.Empty(t, meta.Headers["X-Cacheguard-Previous-Domain"], "previous domain must be omitted from headers")
-	assert.Empty(t, meta.Headers["X-Cacheguard-Drift-Reason"], "drift reason derived from client must be omitted")
-	assert.Empty(t, meta.Headers["X-Cacheguard-Cached-Tokens"], "cached tokens must be omitted when details unavailable")
+	assert.Empty(t, meta.Headers["X-Stillmark-Previous-Domain"], "previous domain must be omitted from headers")
+	assert.Empty(t, meta.Headers["X-Stillmark-Drift-Reason"], "drift reason derived from client must be omitted")
+	assert.Empty(t, meta.Headers["X-Stillmark-Cached-Tokens"], "cached tokens must be omitted when details unavailable")
 
 	// Domain changed flag is kept
-	assert.Equal(t, "true", meta.Headers["X-Cacheguard-Domain-Changed"])
+	assert.Equal(t, "true", meta.Headers["X-Stillmark-Domain-Changed"])
 
 	// Detailed schema path is opt-in via server config only: default is false, so path must be omitted for privacy
-	assert.Empty(t, meta.Headers["X-Cacheguard-Drift-Path"], "detailed schema path must be omitted by default to avoid leaking property names")
+	assert.Empty(t, meta.Headers["X-Stillmark-Drift-Path"], "detailed schema path must be omitted by default to avoid leaking property names")
 
 	// Verify client-supplied header CANNOT bypass operator privacy policy
 	metaClientAttempt := &schemas.HTTPResponseMetadata{
@@ -2376,12 +2376,12 @@ func TestPrivacy_HeadersOmitSensitiveFields(t *testing.T) {
 	}
 	reqClientAttempt := &schemas.HTTPRequest{
 		Headers: map[string]string{
-			"x-cacheguard-expose-paths": "true",
+			"x-stillmark-expose-paths": "true",
 		},
 	}
 	err = HTTPTransportResponseHeadersHook(ctx, reqClientAttempt, metaClientAttempt)
 	require.NoError(t, err)
-	assert.Empty(t, metaClientAttempt.Headers["X-Cacheguard-Drift-Path"], "arbitrary client header must not enable schema path disclosure")
+	assert.Empty(t, metaClientAttempt.Headers["X-Stillmark-Drift-Path"], "arbitrary client header must not enable schema path disclosure")
 
 	// When explicitly opted in via trusted SERVER configuration, path is emitted and sanitized
 	_ = Init(map[string]any{
@@ -2398,15 +2398,15 @@ func TestPrivacy_HeadersOmitSensitiveFields(t *testing.T) {
 	}
 	err = HTTPTransportResponseHeadersHook(ctx, nil, metaServerOptIn)
 	require.NoError(t, err)
-	cleanPath := metaServerOptIn.Headers["X-Cacheguard-Drift-Path"]
+	cleanPath := metaServerOptIn.Headers["X-Stillmark-Drift-Path"]
 	assert.NotEmpty(t, cleanPath, "detailed schema path should be emitted when enabled by server config")
 	assert.NotContains(t, cleanPath, "\n")
 	assert.NotContains(t, cleanPath, "\r")
 }
 
-func TestCacheMetric_NonNilDetailsWithoutCacheMetricSuppressesCG003(t *testing.T) {
+func TestCacheMetric_NonNilDetailsWithoutCacheMetricSuppressesSM003(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// Stable turn with PromptTokensDetails present, but containing ONLY non-cache tokens (e.g. AudioTokens)
 	diag := &RequestDiagnostic{
@@ -2437,7 +2437,7 @@ func TestCacheMetric_NonNilDetailsWithoutCacheMetricSuppressesCG003(t *testing.T
 
 	findings := BuildDiagnosticFindings(diag)
 	for _, f := range findings {
-		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "CG003 must be suppressed when provider never provided cache metric")
+		assert.NotEqual(t, CodeStableMissUnknownCause, f.Code, "SM003 must be suppressed when provider never provided cache metric")
 	}
 }
 
@@ -2469,7 +2469,7 @@ func TestSecurity_HMACConcurrencyWithCleanup(t *testing.T) {
 
 func BenchmarkPreLLMHook_NestedTools(b *testing.B) {
 	InitEngine(1000, 10, 30*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	schemaJSON := []byte(`{
 		"type": "object",
@@ -2575,7 +2575,7 @@ func BenchmarkToolSchema_FlatteningOnly(b *testing.B) {
 
 func BenchmarkHMAC_ComputeOnly(b *testing.B) {
 	InitEngine(100, 10, 10*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	data := []byte("system:You are a high-performance Bifrost AI gateway tester;tools:query_metrics:v1;")
 	b.ResetTimer()
@@ -2586,9 +2586,9 @@ func BenchmarkHMAC_ComputeOnly(b *testing.B) {
 	}
 }
 
-func TestStreamingTransformationTiming_HeadersHookDoesNotEmitPrematureCG002OrCG007(t *testing.T) {
+func TestStreamingTransformationTiming_HeadersHookDoesNotEmitPrematureSM002OrSM007(t *testing.T) {
 	InitEngine(100, 10, 5*time.Minute)
-	defer CleanupEngine()
+	defer resetEngine()
 
 	// In a streaming request lifecycle:
 	// 1. PreLLMHook runs and sets up diag
@@ -2605,16 +2605,16 @@ func TestStreamingTransformationTiming_HeadersHookDoesNotEmitPrematureCG002OrCG0
 
 	// 2. HTTPTransportResponseHeadersHook runs BEFORE stream chunks arrive.
 	// At this stage, PostLLMHook has not run, so RawRequest has not been observed.
-	// Transformation must remain None, and neither CG002 nor CG007 can appear in headers.
+	// Transformation must remain None, and neither SM002 nor SM007 can appear in headers.
 	meta := &schemas.HTTPResponseMetadata{
 		Headers: make(map[string]string),
 	}
 	err = HTTPTransportResponseHeadersHook(ctx, nil, meta)
 	require.NoError(t, err)
 
-	assert.Empty(t, meta.Headers["X-Cacheguard-Transformation"], "transformation cannot be emitted before PostLLMHook observes outbound request")
-	assert.Empty(t, meta.Headers["X-Cacheguard-Injected-Path"], "injected path cannot be emitted prematurely")
-	assert.Empty(t, meta.Headers["X-Cacheguard-Finding-Code"], "CG002/CG007 must not appear in streaming response headers before observation")
+	assert.Empty(t, meta.Headers["X-Stillmark-Transformation"], "transformation cannot be emitted before PostLLMHook observes outbound request")
+	assert.Empty(t, meta.Headers["X-Stillmark-Injected-Path"], "injected path cannot be emitted prematurely")
+	assert.Empty(t, meta.Headers["X-Stillmark-Finding-Code"], "SM002/SM007 must not appear in streaming response headers before observation")
 
 	// 3. Subsequently, in PostLLMHook (chunk 1), raw request is observed
 	resp := &schemas.BifrostResponse{
@@ -2652,3 +2652,14 @@ func TestStreamingTransformationTiming_HeadersHookDoesNotEmitPrematureCG002OrCG0
 	assert.Equal(t, CodeGatewayBreakpointInjected, diag.PrimaryFinding.Code)
 }
 
+// resetEngine and resetPlugin restore the engine state that TestMain sets up, so every test
+// leaves a working engine behind and tests pass in any order (go test -shuffle=on).
+func resetEngine() {
+	CleanupEngine()
+	_ = InitEngine(DefaultMaxSessions, DefaultMaxEntries, DefaultSessionTTL)
+}
+
+func resetPlugin() {
+	_ = Cleanup()
+	_ = InitEngine(DefaultMaxSessions, DefaultMaxEntries, DefaultSessionTTL)
+}

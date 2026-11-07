@@ -1,0 +1,65 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Bifrost commit StillMark was last verified against. Bump deliberately.
+  BIFROST_REF: 6e640279b36337820f2088fb85f6e78f339063c3
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out StillMark
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: stillmark
+
+      - name: Check out Bifrost
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: maximhq/bifrost
+          ref: ${{ env.BIFROST_REF }}
+          path: bifrost
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Place plugin inside the Bifrost workspace
+        run: |
+          rm -rf bifrost/plugins/stillmark
+          cp -R stillmark/plugins/stillmark bifrost/plugins/stillmark
+          cd bifrost && make setup-workspace
+
+      - name: Check formatting
+        working-directory: bifrost/plugins/stillmark
+        run: test -z "$(gofmt -l *.go)" || (gofmt -l *.go && exit 1)
+
+      - name: Build plugin
+        working-directory: bifrost/plugins/stillmark
+        run: make build
+
+      - name: Vet
+        working-directory: bifrost/plugins/stillmark
+        run: go vet .
+
+      - name: Unit tests (race detector)
+        working-directory: bifrost/plugins/stillmark
+        run: go test -race -count=1 .
+
+      - name: Unit tests (random order)
+        working-directory: bifrost/plugins/stillmark
+        run: go test -count=1 -shuffle=on .
+
+      - name: Installer tests
+        working-directory: bifrost/plugins/stillmark
+        run: go run test_installer.go

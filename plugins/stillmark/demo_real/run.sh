@@ -22,12 +22,12 @@ for port in $LLAMA_PORT $GW_PORT 8099; do
 done
 
 echo "==> Building StillMark plugin and Bifrost (first run takes a few minutes)"
-rsync -a --delete --exclude build --exclude demo_real "$PLUGIN_SRC/" "$BIFROST_DIR/plugins/cacheguard/"
+rsync -a --delete --exclude build --exclude demo_real "$PLUGIN_SRC/" "$BIFROST_DIR/plugins/stillmark/"
 ( cd "$BIFROST_DIR" && [ -f go.work ] || make setup-workspace >/dev/null )
 mkdir -p "$BIFROST_DIR/transports/bifrost-http/ui" "$BIFROST_DIR/tmp"
 [ -n "$(ls -A "$BIFROST_DIR/transports/bifrost-http/ui")" ] || echo '<html></html>' > "$BIFROST_DIR/transports/bifrost-http/ui/index.html"
 ( cd "$BIFROST_DIR/transports/bifrost-http" && go build -o ../../tmp/bifrost-http . )
-( cd "$BIFROST_DIR/plugins/cacheguard" && make build >/dev/null )
+( cd "$BIFROST_DIR/plugins/stillmark" && make build >/dev/null )
 
 echo "==> Starting local model (fresh process = cold cache)"
 llama-server -hf "$MODEL" --jinja -c 8192 --port $LLAMA_PORT --host 127.0.0.1 >"$WORK/llama.log" 2>&1 & PIDS+=($!)
@@ -38,7 +38,7 @@ echo "==> Starting Bifrost with StillMark"
 cat >"$WORK/config.json" <<JSON
 {"\$schema":"https://www.getbifrost.ai/schema","setup_token":"local-demo-token","source_of_truth":"config.json",
  "client_config":{"port":"$GW_PORT","host":"127.0.0.1"},
- "plugins":[{"name":"cacheguard","type":"shared_object","path":"$BIFROST_DIR/plugins/cacheguard/build/cacheguard.so","enabled":true,
+ "plugins":[{"name":"stillmark","type":"shared_object","path":"$BIFROST_DIR/plugins/stillmark/build/stillmark.so","enabled":true,
    "config":{"expose_schema_paths":true,"report_addr":"127.0.0.1:8099"}}],
  "providers":{"openai":{"send_back_raw_request":true,"keys":[{"name":"local","value":"sk-local","models":["qwen"]}],
    "network_config":{"base_url":"http://127.0.0.1:$LLAMA_PORT","allow_private_network":true}}},

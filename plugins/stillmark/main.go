@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	PluginName                              = "cacheguard"
-	ctxDiagKey    schemas.BifrostContextKey = "cacheguard_diagnostic_key"
-	ctxSessionKey schemas.BifrostContextKey = "cacheguard_session_key"
+	PluginName                              = "stillmark"
+	ctxDiagKey    schemas.BifrostContextKey = "stillmark_diagnostic_key"
+	ctxSessionKey schemas.BifrostContextKey = "stillmark_session_key"
 )
 
 // RequestDiagnostic holds non-sensitive metadata for the current request.
@@ -70,11 +70,11 @@ func GetName() string {
 	return PluginName
 }
 
-// Init initializes the CacheGuard plugin with process-local key, bounded tracker, and operator config.
+// Init initializes the StillMark plugin with process-local key, bounded tracker, and operator config.
 func Init(config any) error {
 	cfg, err := ValidateAndApplyConfig(config)
 	if err != nil {
-		fmt.Printf("[CacheGuard] Configuration warning (using defaults): %v\n", err)
+		fmt.Printf("[StillMark] Configuration warning (using defaults): %v\n", err)
 	}
 
 	activeConfigMu.Lock()
@@ -155,7 +155,7 @@ func HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest)
 		Attribution: AttributionNone,
 	}
 
-	// Byte-exact fingerprint of the client's tools array (used by CG011 attribution)
+	// Byte-exact fingerprint of the client's tools array (used by SM011 attribution)
 	diag.Snapshot.ClientToolsRawHMAC = RawToolsHMAC(req.Body)
 
 	for k, v := range req.Headers {
@@ -525,25 +525,25 @@ func HTTPTransportResponseHeadersHook(ctx *schemas.BifrostContext, req *schemas.
 	}
 
 	if resp != nil {
-		resp.SetHeader("X-Cacheguard-Status", "active")
-		resp.SetHeader("X-Cacheguard-Observed", fmt.Sprintf("%d", requestCounter.Load()))
+		resp.SetHeader("X-Stillmark-Status", "active")
+		resp.SetHeader("X-Stillmark-Observed", fmt.Sprintf("%d", requestCounter.Load()))
 
 		if ctx != nil {
 			if val := ctx.Value(ctxDiagKey); val != nil {
 				if diag, ok := val.(*RequestDiagnostic); ok {
-					resp.SetHeader("X-Cacheguard-Diagnosis", string(diag.Diagnosis))
-					resp.SetHeader("X-Cacheguard-Attribution", string(diag.Attribution))
+					resp.SetHeader("X-Stillmark-Diagnosis", string(diag.Diagnosis))
+					resp.SetHeader("X-Stillmark-Attribution", string(diag.Attribution))
 					if diag.SessionID != "" {
 						mode := "explicit"
 						if diag.AutoSession {
 							mode = "auto"
 						}
-						resp.SetHeader("X-Cacheguard-Session-Mode", mode)
+						resp.SetHeader("X-Stillmark-Session-Mode", mode)
 					}
 
 					if diag.DomainChanged {
-						resp.SetHeader("X-Cacheguard-Domain-Changed", "true")
-						// Privacy: Omit X-Cacheguard-Previous-Domain to prevent leaking provider/model information
+						resp.SetHeader("X-Stillmark-Domain-Changed", "true")
+						// Privacy: Omit X-Stillmark-Previous-Domain to prevent leaking provider/model information
 					}
 
 					activeConfigMu.RLock()
@@ -551,41 +551,41 @@ func HTTPTransportResponseHeadersHook(ctx *schemas.BifrostContext, req *schemas.
 					activeConfigMu.RUnlock()
 
 					if diag.Drift.Detected {
-						resp.SetHeader("X-Cacheguard-Drift-Component", diag.Drift.Component)
+						resp.SetHeader("X-Stillmark-Drift-Component", diag.Drift.Component)
 						if diag.Drift.Path != "" && exposePaths {
-							resp.SetHeader("X-Cacheguard-Drift-Path", SanitizeFieldPath(diag.Drift.Path))
+							resp.SetHeader("X-Stillmark-Drift-Path", SanitizeFieldPath(diag.Drift.Path))
 						}
-						resp.SetHeader("X-Cacheguard-Drift-Type", diag.Drift.ChangeType)
+						resp.SetHeader("X-Stillmark-Drift-Type", diag.Drift.ChangeType)
 						// Privacy: Omit raw client-derived drift reason strings from response headers
 					}
 
 					if diag.HasUsage {
-						resp.SetHeader("X-Cacheguard-Prompt-Tokens", fmt.Sprintf("%d", diag.PromptTokens))
+						resp.SetHeader("X-Stillmark-Prompt-Tokens", fmt.Sprintf("%d", diag.PromptTokens))
 						if diag.HasPromptDetails {
-							resp.SetHeader("X-Cacheguard-Cached-Tokens", fmt.Sprintf("%d", diag.CachedReadTokens))
+							resp.SetHeader("X-Stillmark-Cached-Tokens", fmt.Sprintf("%d", diag.CachedReadTokens))
 						}
 						if diag.CacheTokensLost > 0 {
-							resp.SetHeader("X-Cacheguard-Cache-Tokens-Lost", fmt.Sprintf("%d", diag.CacheTokensLost))
-							resp.SetHeader("X-Cacheguard-Est-Extra-Cost-Per-1k-Requests-USD", fmt.Sprintf("%.2f", diag.EstExtraCostPer1k))
+							resp.SetHeader("X-Stillmark-Cache-Tokens-Lost", fmt.Sprintf("%d", diag.CacheTokensLost))
+							resp.SetHeader("X-Stillmark-Est-Extra-Cost-Per-1k-Requests-USD", fmt.Sprintf("%.2f", diag.EstExtraCostPer1k))
 						}
 					}
 
 					if diag.Transformation.Type != TransformationNone {
-						resp.SetHeader("X-Cacheguard-Transformation", string(diag.Transformation.Type))
-						resp.SetHeader("X-Cacheguard-Client-Markers", fmt.Sprintf("%d", diag.Transformation.ClientMarkers))
-						resp.SetHeader("X-Cacheguard-Outbound-Markers", fmt.Sprintf("%d", diag.Transformation.OutboundMarkers))
+						resp.SetHeader("X-Stillmark-Transformation", string(diag.Transformation.Type))
+						resp.SetHeader("X-Stillmark-Client-Markers", fmt.Sprintf("%d", diag.Transformation.ClientMarkers))
+						resp.SetHeader("X-Stillmark-Outbound-Markers", fmt.Sprintf("%d", diag.Transformation.OutboundMarkers))
 						if diag.Transformation.Path != "" && exposePaths {
-							resp.SetHeader("X-Cacheguard-Injected-Path", SanitizeFieldPath(diag.Transformation.Path))
+							resp.SetHeader("X-Stillmark-Injected-Path", SanitizeFieldPath(diag.Transformation.Path))
 						}
 						if diag.Transformation.WarrantsReview {
-							resp.SetHeader("X-Cacheguard-Review-Recommended", "true")
+							resp.SetHeader("X-Stillmark-Review-Recommended", "true")
 						}
 					}
 
 					if diag.PrimaryFinding != nil {
-						resp.SetHeader("X-Cacheguard-Finding-Code", diag.PrimaryFinding.Code)
-						resp.SetHeader("X-Cacheguard-Finding-Severity", string(diag.PrimaryFinding.Severity))
-						resp.SetHeader("X-Cacheguard-Finding-Message", diag.PrimaryFinding.Message)
+						resp.SetHeader("X-Stillmark-Finding-Code", diag.PrimaryFinding.Code)
+						resp.SetHeader("X-Stillmark-Finding-Severity", string(diag.PrimaryFinding.Severity))
+						resp.SetHeader("X-Stillmark-Finding-Message", diag.PrimaryFinding.Message)
 					}
 				}
 			}
@@ -649,7 +649,7 @@ func emitPrivacySafeLogs(ctx *schemas.BifrostContext, diag *RequestDiagnostic, c
 		if cleanPath == "" {
 			cleanPath = "n/a"
 		}
-		fmt.Printf("[CacheGuard] %s [%s] code=%s component=%s path=%s%s msg=%q action=%q\n",
+		fmt.Printf("[StillMark] %s [%s] code=%s component=%s path=%s%s msg=%q action=%q\n",
 			strings.ToUpper(string(f.Severity)),
 			f.Confidence,
 			f.Code,
@@ -689,5 +689,5 @@ func IsInitialized() bool {
 }
 
 func main() {
-	fmt.Println("Bifrost CacheGuard plugin entrypoint")
+	fmt.Println("Bifrost StillMark plugin entrypoint")
 }

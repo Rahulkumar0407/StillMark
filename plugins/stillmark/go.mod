@@ -1,4 +1,4 @@
-module github.com/maximhq/bifrost/plugins/cacheguard
+module github.com/maximhq/bifrost/plugins/stillmark
 
 go 1.27.3
 

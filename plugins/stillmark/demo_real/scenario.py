@@ -58,18 +58,18 @@ def step(n, label, system, user, tool_list):
     col = C["g"] if pct >= 90 else C["y"] if pct >= 50 else C["r"]
     bar = "█" * round(pct / 5) + "░" * (20 - round(pct / 5))
     print(f" {n:>2}. {label:<34} {col}{bar} {pct:5.1f}%{C['x']}  {C['d']}cached {c}/{p}{C['x']}")
-    diag, code = h.get("X-Cacheguard-Diagnosis", "?"), h.get("X-Cacheguard-Finding-Code")
+    diag, code = h.get("X-Stillmark-Diagnosis", "?"), h.get("X-Stillmark-Finding-Code")
     line = f"     StillMark: {diag}"
-    if h.get("X-Cacheguard-Drift-Path"):
-        line += f" · changed {C['b']}{h['X-Cacheguard-Drift-Path']}{C['x']}"
+    if h.get("X-Stillmark-Drift-Path"):
+        line += f" · changed {C['b']}{h['X-Stillmark-Drift-Path']}{C['x']}"
     if code:
         line += f" · {C['b']}{code}{C['x']}"
     print(line)
-    if h.get("X-Cacheguard-Cache-Tokens-Lost"):
-        print(f"     {C['r']}{h['X-Cacheguard-Cache-Tokens-Lost']} tokens billed at full price instead of cached ≈ "
-              f"${h['X-Cacheguard-Est-Extra-Cost-Per-1k-Requests-USD']} extra per 1,000 requests{C['x']}")
-    if code and h.get("X-Cacheguard-Finding-Message"):
-        print(f"     {C['c']}{h['X-Cacheguard-Finding-Message']}{C['x']}")
+    if h.get("X-Stillmark-Cache-Tokens-Lost"):
+        print(f"     {C['r']}{h['X-Stillmark-Cache-Tokens-Lost']} tokens billed at full price instead of cached ≈ "
+              f"${h['X-Stillmark-Est-Extra-Cost-Per-1k-Requests-USD']} extra per 1,000 requests{C['x']}")
+    if code and h.get("X-Stillmark-Finding-Message"):
+        print(f"     {C['c']}{h['X-Stillmark-Finding-Message']}{C['x']}")
     time.sleep(1.1)  # make sure the clock-based timestamp changes between requests
 
 

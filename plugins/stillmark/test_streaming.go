@@ -117,7 +117,7 @@ func startStreamingGateway(workspaceRoot, dataDir string, enablePlugin bool, plu
 	if enablePlugin {
 		pluginsList = []map[string]any{
 			{
-				"name":    "cacheguard",
+				"name":    "stillmark",
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
@@ -156,7 +156,7 @@ func startStreamingGateway(workspaceRoot, dataDir string, enablePlugin bool, plu
 			"virtual_keys": []map[string]any{
 				{
 					"name":      "Stream Virtual Key",
-					"id":        "vk-cacheguard-stream",
+					"id":        "vk-stillmark-stream",
 					"value":     "sk-bf-stream-vk",
 					"is_active": true,
 					"provider_configs": []map[string]any{
@@ -252,7 +252,7 @@ func readSSEResponse(r io.Reader) ([]string, error) {
 
 func main() {
 	fmt.Println("================================================================================")
-	fmt.Println("         BIFROST CACHEGUARD — REAL HTTP SSE STREAMING VERIFICATION             ")
+	fmt.Println("         BIFROST STILLMARK — REAL HTTP SSE STREAMING VERIFICATION             ")
 	fmt.Println("================================================================================")
 
 	workspaceRoot, err := filepath.Abs("../..")
@@ -261,11 +261,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	pluginPath := filepath.Join(workspaceRoot, "plugins", "cacheguard", "build", "cacheguard.so")
+	pluginPath := filepath.Join(workspaceRoot, "plugins", "stillmark", "build", "stillmark.so")
 	if _, err := os.Stat(pluginPath); err != nil {
 		fmt.Println("Compiling plugin shared object...")
 		buildCmd := exec.Command("make", "build")
-		buildCmd.Dir = filepath.Join(workspaceRoot, "plugins", "cacheguard")
+		buildCmd.Dir = filepath.Join(workspaceRoot, "plugins", "stillmark")
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			fmt.Printf("FAIL: Plugin build failed: %v\n%s\n", err, string(out))
 			os.Exit(1)
@@ -294,9 +294,9 @@ func main() {
 	defer os.RemoveAll(dataDir)
 
 	// -------------------------------------------------------------------------
-	// 1. BOOT GATEWAY WITH CACHEGUARD
+	// 1. BOOT GATEWAY WITH STILLMARK
 	// -------------------------------------------------------------------------
-	fmt.Println("\nStarting Bifrost Gateway on port 8086 with CacheGuard plugin...")
+	fmt.Println("\nStarting Bifrost Gateway on port 8086 with StillMark plugin...")
 	_, cleanupGateway, err := startStreamingGateway(workspaceRoot, dataDir, true, pluginPath, mockBaseURL)
 	if err != nil {
 		fmt.Printf("FAIL: Cannot start streaming gateway: %v\n", err)
@@ -334,7 +334,7 @@ func main() {
 	req1, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	req1.Header.Set("Content-Type", "application/json")
 	req1.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	req1.Header.Set("x-cacheguard-session-id", "stream-sess-alpha")
+	req1.Header.Set("x-stillmark-session-id", "stream-sess-alpha")
 
 	resp1, err := client.Do(req1)
 	if err != nil {
@@ -347,9 +347,9 @@ func main() {
 		failTest("Turn 1 returned status %d: %s", resp1.StatusCode, string(b))
 	}
 
-	diag1 := resp1.Header.Get("X-Cacheguard-Diagnosis")
-	cachedHdr1 := resp1.Header.Get("X-Cacheguard-Cached-Tokens")
-	status1 := resp1.Header.Get("X-Cacheguard-Status")
+	diag1 := resp1.Header.Get("X-Stillmark-Diagnosis")
+	cachedHdr1 := resp1.Header.Get("X-Stillmark-Cached-Tokens")
+	status1 := resp1.Header.Get("X-Stillmark-Status")
 
 	fmt.Printf("  • Turn 1 HTTP Status:      %d\n", resp1.StatusCode)
 
@@ -384,7 +384,7 @@ func main() {
 	req2, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	req2.Header.Set("x-cacheguard-session-id", "stream-sess-alpha")
+	req2.Header.Set("x-stillmark-session-id", "stream-sess-alpha")
 
 	resp2, err := client.Do(req2)
 	if err != nil {
@@ -393,9 +393,9 @@ func main() {
 	}
 	defer resp2.Body.Close()
 
-	diag2 := resp2.Header.Get("X-Cacheguard-Diagnosis")
-	cachedHdr2 := resp2.Header.Get("X-Cacheguard-Cached-Tokens")
-	findingHdr2 := resp2.Header.Get("X-Cacheguard-Finding-Code")
+	diag2 := resp2.Header.Get("X-Stillmark-Diagnosis")
+	cachedHdr2 := resp2.Header.Get("X-Stillmark-Cached-Tokens")
+	findingHdr2 := resp2.Header.Get("X-Stillmark-Finding-Code")
 
 	fmt.Printf("  • Turn 2 SSE Diagnosis Header: %s (Expected: structurally_stable - NOT premature stable_miss!)\n", diag2)
 	fmt.Printf("  • Turn 2 Cached Tokens Header: %q (Expected: empty in SSE header)\n", cachedHdr2)
@@ -423,7 +423,7 @@ func main() {
 	reqErr, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	reqErr.Header.Set("Content-Type", "application/json")
 	reqErr.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	reqErr.Header.Set("x-cacheguard-session-id", "stream-sess-alpha")
+	reqErr.Header.Set("x-stillmark-session-id", "stream-sess-alpha")
 
 	respErr, err := client.Do(reqErr)
 	if err == nil {
@@ -440,7 +440,7 @@ func main() {
 	reqAfterErr, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	reqAfterErr.Header.Set("Content-Type", "application/json")
 	reqAfterErr.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	reqAfterErr.Header.Set("x-cacheguard-session-id", "stream-sess-alpha")
+	reqAfterErr.Header.Set("x-stillmark-session-id", "stream-sess-alpha")
 
 	respAfterErr, err := client.Do(reqAfterErr)
 	if err != nil {
@@ -448,7 +448,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer respAfterErr.Body.Close()
-	diagAfterErr := respAfterErr.Header.Get("X-Cacheguard-Diagnosis")
+	diagAfterErr := respAfterErr.Header.Get("X-Stillmark-Diagnosis")
 	_, _ = io.Copy(io.Discard, respAfterErr.Body)
 
 	fmt.Printf("  • Diagnosis after Error:       %s (Expected: structurally_stable - session was uncorrupted)\n", diagAfterErr)
@@ -464,7 +464,7 @@ func main() {
 	reqCancel, _ := http.NewRequestWithContext(ctxCancel, "POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	reqCancel.Header.Set("Content-Type", "application/json")
 	reqCancel.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	reqCancel.Header.Set("x-cacheguard-session-id", "stream-sess-cancel")
+	reqCancel.Header.Set("x-stillmark-session-id", "stream-sess-cancel")
 
 	respCancel, err := client.Do(reqCancel)
 	if err == nil {
@@ -484,7 +484,7 @@ func main() {
 	reqCheckCancel, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	reqCheckCancel.Header.Set("Content-Type", "application/json")
 	reqCheckCancel.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	reqCheckCancel.Header.Set("x-cacheguard-session-id", "stream-sess-cancel")
+	reqCheckCancel.Header.Set("x-stillmark-session-id", "stream-sess-cancel")
 
 	respCheckCancel, err := client.Do(reqCheckCancel)
 	if err != nil {
@@ -492,7 +492,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer respCheckCancel.Body.Close()
-	diagCheckCancel := respCheckCancel.Header.Get("X-Cacheguard-Diagnosis")
+	diagCheckCancel := respCheckCancel.Header.Get("X-Stillmark-Diagnosis")
 	_, _ = io.Copy(io.Discard, respCheckCancel.Body)
 
 	fmt.Printf("  • Turn after Cancellation:     %s (Expected: initial_request - cancelled turn was not committed)\n", diagCheckCancel)
@@ -511,7 +511,7 @@ func main() {
 	reqNoUsage, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 	reqNoUsage.Header.Set("Content-Type", "application/json")
 	reqNoUsage.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-	reqNoUsage.Header.Set("x-cacheguard-session-id", "stream-sess-nousage")
+	reqNoUsage.Header.Set("x-stillmark-session-id", "stream-sess-nousage")
 
 	respNoUsage, err := client.Do(reqNoUsage)
 	if err != nil {
@@ -541,7 +541,7 @@ func main() {
 			req, _ := http.NewRequest("POST", "http://127.0.0.1:8086/v1/chat/completions", bytes.NewReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer sk-bf-stream-vk")
-			req.Header.Set("x-cacheguard-session-id", sessID)
+			req.Header.Set("x-stillmark-session-id", sessID)
 
 			resp, err := client.Do(req)
 			if err != nil || resp.StatusCode != http.StatusOK {

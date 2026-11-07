@@ -181,7 +181,7 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 	if enablePlugin {
 		pluginsList = []map[string]any{
 			{
-				"name":    "cacheguard",
+				"name":    "stillmark",
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
@@ -238,8 +238,8 @@ func startGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPath, 
 			"virtual_keys": []map[string]any{
 				{
 					"name":      "Test Virtual Key",
-					"id":        "vk-cacheguard-test",
-					"value":     "sk-bf-cacheguard-vk",
+					"id":        "vk-stillmark-test",
+					"value":     "sk-bf-stillmark-vk",
 					"is_active": true,
 					"provider_configs": []map[string]any{
 						{
@@ -343,8 +343,8 @@ func sendRequest(client *http.Client, payload map[string]any, extraHeaders ...ma
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
-	req.Header.Set("x-bf-vk", "sk-bf-cacheguard-vk")
+	req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
+	req.Header.Set("x-bf-vk", "sk-bf-stillmark-vk")
 
 	if len(extraHeaders) > 0 {
 		for k, v := range extraHeaders[0] {
@@ -375,7 +375,7 @@ func sendRequest(client *http.Client, payload map[string]any, extraHeaders ...ma
 
 func main() {
 	fmt.Println("================================================================================")
-	fmt.Println("  BIFROST CACHEGUARD — ATTRIBUTION & INTEGRATION TEST SUITE (A, B, C, D, E, F)  ")
+	fmt.Println("  BIFROST STILLMARK — ATTRIBUTION & INTEGRATION TEST SUITE (A, B, C, D, E, F)  ")
 	fmt.Println("================================================================================")
 
 	workspaceRoot, err := filepath.Abs("../..")
@@ -384,13 +384,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	pluginPath := filepath.Join(workspaceRoot, "plugins", "cacheguard", "build", "cacheguard.so")
+	pluginPath := filepath.Join(workspaceRoot, "plugins", "stillmark", "build", "stillmark.so")
 	if _, err := os.Stat(pluginPath); err != nil {
 		fmt.Printf("FAIL: Compiled plugin not found at %s: %v\n", pluginPath, err)
 		os.Exit(1)
 	}
 
-	dataDir := filepath.Join(workspaceRoot, "plugins", "cacheguard", ".test_data")
+	dataDir := filepath.Join(workspaceRoot, "plugins", "stillmark", ".test_data")
 	_ = os.RemoveAll(dataDir)
 	_ = os.MkdirAll(dataDir, 0755)
 	defer os.RemoveAll(dataDir)
@@ -482,9 +482,9 @@ func main() {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
 	// -------------------------------------------------------------------------
-	// PHASE 1: START GATEWAY WITH CACHEGUARD ENABLED
+	// PHASE 1: START GATEWAY WITH STILLMARK ENABLED
 	// -------------------------------------------------------------------------
-	fmt.Printf("[Phase 1] Starting isolated Bifrost gateway on port 8081 (CacheGuard ENABLED)...\n")
+	fmt.Printf("[Phase 1] Starting isolated Bifrost gateway on port 8081 (StillMark ENABLED)...\n")
 	_, cleanupGateway, err := startGateway(workspaceRoot, dataDir, true, pluginPath, mockBaseURL)
 	if err != nil {
 		fmt.Printf("FAIL: Gateway startup failed: %v\n", err)
@@ -500,7 +500,7 @@ func main() {
 	fmt.Println("TEST A — CLIENT-ORIGINATED CHANGE (TOOL SCHEMA DRIFT)")
 	fmt.Println("--------------------------------------------------------------------------------")
 	sessionHeadersA := map[string]string{
-		"X-Cacheguard-Session-ID": "session-test-a-client-drift",
+		"X-Stillmark-Session-ID": "session-test-a-client-drift",
 	}
 
 	fmt.Println("  [Turn 1] Client sends baseline request with node_id type:string")
@@ -509,8 +509,8 @@ func main() {
 		fmt.Printf("FAIL: Turn A1 failed (status: %d, err: %v, body: %+v)\n", statusA1, err, bodyA1)
 		os.Exit(1)
 	}
-	diagA1 := hdrA1.Get("X-Cacheguard-Diagnosis")
-	attrA1 := hdrA1.Get("X-Cacheguard-Attribution")
+	diagA1 := hdrA1.Get("X-Stillmark-Diagnosis")
+	attrA1 := hdrA1.Get("X-Stillmark-Attribution")
 	fmt.Printf("    • Turn 1 Gateway Diagnosis:   %s (Expected: initial_request)\n", diagA1)
 	fmt.Printf("    • Turn 1 Gateway Attribution: %s (Expected: none)\n", attrA1)
 
@@ -520,29 +520,29 @@ func main() {
 		fmt.Printf("FAIL: Turn A2 failed (status: %d, err: %v)\n", statusA2, err)
 		os.Exit(1)
 	}
-	diagA2 := hdrA2.Get("X-Cacheguard-Diagnosis")
-	attrA2 := hdrA2.Get("X-Cacheguard-Attribution")
-	compA2 := hdrA2.Get("X-Cacheguard-Drift-Component")
-	pathA2 := hdrA2.Get("X-Cacheguard-Drift-Path")
-	typeA2 := hdrA2.Get("X-Cacheguard-Drift-Type")
+	diagA2 := hdrA2.Get("X-Stillmark-Diagnosis")
+	attrA2 := hdrA2.Get("X-Stillmark-Attribution")
+	compA2 := hdrA2.Get("X-Stillmark-Drift-Component")
+	pathA2 := hdrA2.Get("X-Stillmark-Drift-Path")
+	typeA2 := hdrA2.Get("X-Stillmark-Drift-Type")
 
-	codeA2 := hdrA2.Get("X-Cacheguard-Finding-Code")
-	sevA2 := hdrA2.Get("X-Cacheguard-Finding-Severity")
-	msgA2 := hdrA2.Get("X-Cacheguard-Finding-Message")
+	codeA2 := hdrA2.Get("X-Stillmark-Finding-Code")
+	sevA2 := hdrA2.Get("X-Stillmark-Finding-Severity")
+	msgA2 := hdrA2.Get("X-Stillmark-Finding-Message")
 
 	fmt.Printf("    • Turn 2 Gateway Diagnosis:   %s (Expected: confirmed_drift)\n", diagA2)
 	fmt.Printf("    • Turn 2 Gateway Attribution: %s (Expected: client_input_changed)\n", attrA2)
 	fmt.Printf("    • Changed Component:          %s (Expected: tools)\n", compA2)
 	fmt.Printf("    • Exact Schema Path:          %s\n", pathA2)
 	fmt.Printf("    • Mutation Type:              %s (Expected: modified)\n", typeA2)
-	fmt.Printf("    • Finding Code:               %s (Expected: CG001)\n", codeA2)
+	fmt.Printf("    • Finding Code:               %s (Expected: SM001)\n", codeA2)
 	fmt.Printf("    • Finding Severity:           %s (Expected: warning)\n", sevA2)
 	fmt.Printf("    • Finding Message:            %q\n", msgA2)
 
 	expectedPath := "tools[0].function.parameters.properties.node_id.type"
-	testAOk := (diagA2 == "confirmed_drift" && attrA2 == "client_input_changed" && compA2 == "tools" && pathA2 == expectedPath && typeA2 == "modified" && codeA2 == "CG001" && sevA2 == "warning")
+	testAOk := (diagA2 == "confirmed_drift" && attrA2 == "client_input_changed" && compA2 == "tools" && pathA2 == expectedPath && typeA2 == "modified" && codeA2 == "SM001" && sevA2 == "warning")
 	if testAOk {
-		fmt.Println(">>> TEST A RESULT: PASS (CacheGuard correctly identified client_input_changed with exact path and emitted CG001 warning)")
+		fmt.Println(">>> TEST A RESULT: PASS (StillMark correctly identified client_input_changed with exact path and emitted SM001 warning)")
 	} else {
 		fmt.Printf(">>> TEST A RESULT: FAIL (diag=%s, attr=%s, path=%s, code=%s)\n", diagA2, attrA2, pathA2, codeA2)
 		os.Exit(1)
@@ -573,7 +573,7 @@ func main() {
 	fmt.Println("TEST C — STABLE INPUT AND OUTPUT (NO FALSE DRIFT)")
 	fmt.Println("--------------------------------------------------------------------------------")
 	sessionHeadersC := map[string]string{
-		"X-Cacheguard-Session-ID": "session-test-c-stable-baseline",
+		"X-Stillmark-Session-ID": "session-test-c-stable-baseline",
 	}
 
 	fmt.Println("  [Turn 1] Client sends baseline request (simulated cache hit: prompt=500, cached=400)")
@@ -583,7 +583,7 @@ func main() {
 		fmt.Printf("FAIL: Turn C1 failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("    • Turn 1 Diagnosis: %s (Expected: initial_request)\n", hdrC1.Get("X-Cacheguard-Diagnosis"))
+	fmt.Printf("    • Turn 1 Diagnosis: %s (Expected: initial_request)\n", hdrC1.Get("X-Stillmark-Diagnosis"))
 
 	fmt.Println("  [Turn 2] Client sends EQUIVALENT request (identical tools, identical prompt)")
 	capture.SetUsage(500, 400)
@@ -593,10 +593,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	diagC2 := hdrC2.Get("X-Cacheguard-Diagnosis")
-	attrC2 := hdrC2.Get("X-Cacheguard-Attribution")
-	driftCompC2 := hdrC2.Get("X-Cacheguard-Drift-Component")
-	cachedToksC2 := hdrC2.Get("X-Cacheguard-Cached-Tokens")
+	diagC2 := hdrC2.Get("X-Stillmark-Diagnosis")
+	attrC2 := hdrC2.Get("X-Stillmark-Attribution")
+	driftCompC2 := hdrC2.Get("X-Stillmark-Drift-Component")
+	cachedToksC2 := hdrC2.Get("X-Stillmark-Cached-Tokens")
 
 	fmt.Printf("    • Turn 2 Diagnosis:     %s (Expected: stable_hit)\n", diagC2)
 	fmt.Printf("    • Turn 2 Attribution:   %s (Expected: none)\n", attrC2)
@@ -630,22 +630,22 @@ func main() {
 	detailsD := usageD["prompt_tokens_details"].(map[string]any)
 	cachedTokD := int(detailsD["cached_tokens"].(float64))
 
-	diagD := hdrD.Get("X-Cacheguard-Diagnosis")
-	cachedHdrD := hdrD.Get("X-Cacheguard-Cached-Tokens")
+	diagD := hdrD.Get("X-Stillmark-Diagnosis")
+	cachedHdrD := hdrD.Get("X-Stillmark-Cached-Tokens")
 
-	codeD := hdrD.Get("X-Cacheguard-Finding-Code")
-	msgD := hdrD.Get("X-Cacheguard-Finding-Message")
+	codeD := hdrD.Get("X-Stillmark-Finding-Code")
+	msgD := hdrD.Get("X-Stillmark-Finding-Message")
 
 	fmt.Printf("    • Mock Provider Reported:      prompt_tokens=%d, cached_tokens=%d (SIMULATED)\n", promptTokD, cachedTokD)
-	fmt.Printf("    • CacheGuard Observed Cached:  %s tokens\n", cachedHdrD)
-	fmt.Printf("    • CacheGuard Diagnosis:        %s (Expected: stable_miss)\n", diagD)
-	fmt.Printf("    • Finding Code:                %s (Expected: CG003)\n", codeD)
+	fmt.Printf("    • StillMark Observed Cached:  %s tokens\n", cachedHdrD)
+	fmt.Printf("    • StillMark Diagnosis:        %s (Expected: stable_miss)\n", diagD)
+	fmt.Printf("    • Finding Code:                %s (Expected: SM003)\n", codeD)
 	fmt.Printf("    • Finding Message:             %q\n", msgD)
 	fmt.Println("    • Diagnosis Clarification:     Cause is unknown (cold start / provider eviction); not claimed provider eviction")
 
-	testDOk := (diagD == "stable_miss" && cachedHdrD == "0" && cachedTokD == 0 && codeD == "CG003")
+	testDOk := (diagD == "stable_miss" && cachedHdrD == "0" && cachedTokD == 0 && codeD == "SM003")
 	if testDOk {
-		fmt.Println(">>> TEST D RESULT: PASS (Simulated cache miss diagnosed as stable_miss with CG003 without false eviction claims)")
+		fmt.Println(">>> TEST D RESULT: PASS (Simulated cache miss diagnosed as stable_miss with SM003 without false eviction claims)")
 	} else {
 		fmt.Printf(">>> TEST D RESULT: FAIL (diag=%s, cached=%s, code=%s)\n", diagD, cachedHdrD, codeD)
 		os.Exit(1)
@@ -658,7 +658,7 @@ func main() {
 	fmt.Println("TEST E — PROVIDER / MODEL DOMAIN ISOLATION")
 	fmt.Println("--------------------------------------------------------------------------------")
 	sessionHeadersE := map[string]string{
-		"X-Cacheguard-Session-ID": "session-test-e-domain-isolation",
+		"X-Stillmark-Session-ID": "session-test-e-domain-isolation",
 	}
 
 	fmt.Println("  [Turn 1] Client sends request with model: gpt-4o")
@@ -667,7 +667,7 @@ func main() {
 		fmt.Printf("FAIL: Turn E1 failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("    • Turn 1 Diagnosis:      %s (Expected: initial_request)\n", hdrE1.Get("X-Cacheguard-Diagnosis"))
+	fmt.Printf("    • Turn 1 Diagnosis:      %s (Expected: initial_request)\n", hdrE1.Get("X-Stillmark-Diagnosis"))
 
 	fmt.Println("  [Turn 2] Client sends equivalent request in SAME session with model: gpt-4o-alt")
 	_, hdrE2, _, err := sendRequest(httpClient, buildSampleRequest("gpt-4o-alt", "string"), sessionHeadersE)
@@ -675,9 +675,9 @@ func main() {
 		fmt.Printf("FAIL: Turn E2 failed: %v\n", err)
 		os.Exit(1)
 	}
-	diagE2 := hdrE2.Get("X-Cacheguard-Diagnosis")
-	domainChangedE2 := hdrE2.Get("X-Cacheguard-Domain-Changed")
-	prevDomainE2 := hdrE2.Get("X-Cacheguard-Previous-Domain")
+	diagE2 := hdrE2.Get("X-Stillmark-Diagnosis")
+	domainChangedE2 := hdrE2.Get("X-Stillmark-Domain-Changed")
+	prevDomainE2 := hdrE2.Get("X-Stillmark-Previous-Domain")
 
 	fmt.Printf("    • Turn 2 Diagnosis:      %s (Expected: initial_request — separate cache history)\n", diagE2)
 	fmt.Printf("    • Domain Switch Flagged: %s (Expected: true)\n", domainChangedE2)
@@ -698,7 +698,7 @@ func main() {
 	fmt.Println("TEST F — REAL BIFROST PROMPT-CACHE BREAKPOINT INJECTION TRANSFORMATION")
 	fmt.Println("--------------------------------------------------------------------------------")
 	sessionHeadersF := map[string]string{
-		"X-Cacheguard-Session-ID": "session-test-f-prompt-cache-injection",
+		"X-Stillmark-Session-ID": "session-test-f-prompt-cache-injection",
 	}
 
 	anthropicPayload := map[string]any{
@@ -724,10 +724,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	transF1 := hdrF1.Get("X-Cacheguard-Transformation")
-	clientMarkersF1 := hdrF1.Get("X-Cacheguard-Client-Markers")
-	outboundMarkersF1 := hdrF1.Get("X-Cacheguard-Outbound-Markers")
-	injectedPathF1 := hdrF1.Get("X-Cacheguard-Injected-Path")
+	transF1 := hdrF1.Get("X-Stillmark-Transformation")
+	clientMarkersF1 := hdrF1.Get("X-Stillmark-Client-Markers")
+	outboundMarkersF1 := hdrF1.Get("X-Stillmark-Outbound-Markers")
+	injectedPathF1 := hdrF1.Get("X-Stillmark-Injected-Path")
 
 	fmt.Printf("    • Turn 1 Gateway Status:         %d OK\n", statusF1)
 	fmt.Printf("    • Observed Transformation:       %s (Expected: cache_control_injected)\n", transF1)
@@ -748,9 +748,9 @@ func main() {
 		fmt.Printf("    • Real Outbound Marker Path:     %s\n", outboundPaths[0])
 	}
 
-	codeF1 := hdrF1.Get("X-Cacheguard-Finding-Code")
-	msgF1 := hdrF1.Get("X-Cacheguard-Finding-Message")
-	fmt.Printf("    • Finding Code:                  %s (Expected: CG002)\n", codeF1)
+	codeF1 := hdrF1.Get("X-Stillmark-Finding-Code")
+	msgF1 := hdrF1.Get("X-Stillmark-Finding-Message")
+	fmt.Printf("    • Finding Code:                  %s (Expected: SM002)\n", codeF1)
 	fmt.Printf("    • Finding Message:               %q\n", msgF1)
 
 	testF1Ok := (transF1 == "cache_control_injected" &&
@@ -758,7 +758,7 @@ func main() {
 		outboundMarkersF1 == "1" &&
 		outboundMarkerCount == 1 &&
 		strings.Contains(injectedPathF1, "cache_control") &&
-		codeF1 == "CG002")
+		codeF1 == "SM002")
 
 	if !testF1Ok {
 		fmt.Printf(">>> TEST F1 RESULT: FAIL (trans=%s, client=%s, outbound=%s, captured=%d, code=%s)\n",
@@ -769,7 +769,7 @@ func main() {
 
 	// Turn 2: Send equivalent request in the SAME session.
 	// Both requests receive consistent gateway injection.
-	// Verify that CacheGuard does NOT misattribute this as cross-request gateway_output_changed!
+	// Verify that StillMark does NOT misattribute this as cross-request gateway_output_changed!
 	fmt.Println("\n  [Turn 2] Client sends equivalent request in SAME session to verify cross-request attribution stability")
 	statusF2, hdrF2, _, err := sendRequest(httpClient, anthropicPayload, sessionHeadersF)
 	if err != nil {
@@ -780,9 +780,9 @@ func main() {
 		fmt.Printf("FAIL: Turn F2 returned status %d\n", statusF2)
 		os.Exit(1)
 	}
-	diagF2 := hdrF2.Get("X-Cacheguard-Diagnosis")
-	attrF2 := hdrF2.Get("X-Cacheguard-Attribution")
-	driftCompF2 := hdrF2.Get("X-Cacheguard-Drift-Component")
+	diagF2 := hdrF2.Get("X-Stillmark-Diagnosis")
+	attrF2 := hdrF2.Get("X-Stillmark-Attribution")
+	driftCompF2 := hdrF2.Get("X-Stillmark-Drift-Component")
 
 	fmt.Printf("    • Turn 2 Gateway Diagnosis:      %s (Expected: stable_hit or stable_miss)\n", diagF2)
 	fmt.Printf("    • Turn 2 Gateway Attribution:    %s (Expected: none — stable gateway output)\n", attrF2)
@@ -802,7 +802,7 @@ func main() {
 	fmt.Println("\n--------------------------------------------------------------------------------")
 	fmt.Println("STOCK BIFROST WITHOUT PLUGIN VERIFICATION")
 	fmt.Println("--------------------------------------------------------------------------------")
-	fmt.Println("  Action: Stopping plugin gateway and booting stock Bifrost (CacheGuard DISABLED)...")
+	fmt.Println("  Action: Stopping plugin gateway and booting stock Bifrost (StillMark DISABLED)...")
 	cleanupGateway()
 	time.Sleep(500 * time.Millisecond)
 
@@ -812,7 +812,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer cleanupStockGateway()
-	fmt.Println("✓ Stock Bifrost gateway is online on http://127.0.0.1:8081 without CacheGuard")
+	fmt.Println("✓ Stock Bifrost gateway is online on http://127.0.0.1:8081 without StillMark")
 
 	preCount := capture.Count()
 	stockStatus, stockHdr, stockResp, err := sendRequest(httpClient, buildSampleRequest("gpt-4o", "string"))
@@ -822,7 +822,7 @@ func main() {
 	}
 
 	stockReceivedByMock := (capture.Count() == preCount+1)
-	hasCacheGuardHeader := stockHdr.Get("X-Cacheguard-Status") != ""
+	hasStillMarkHeader := stockHdr.Get("X-Stillmark-Status") != ""
 
 	choices := stockResp["choices"].([]any)
 	firstChoice := choices[0].(map[string]any)
@@ -831,10 +831,10 @@ func main() {
 
 	fmt.Printf("  • Gateway HTTP Status:           %d OK\n", stockStatus)
 	fmt.Printf("  • Request Received by Mock:      %t\n", stockReceivedByMock)
-	fmt.Printf("  • CacheGuard Headers Absent:     %t (Status header: %q)\n", !hasCacheGuardHeader, stockHdr.Get("X-Cacheguard-Status"))
+	fmt.Printf("  • StillMark Headers Absent:     %t (Status header: %q)\n", !hasStillMarkHeader, stockHdr.Get("X-Stillmark-Status"))
 	fmt.Printf("  • AI Response Content Intact:    %t\n", strings.Contains(content, "Verified mock completion"))
 
-	stockOk := (stockStatus == http.StatusOK && stockReceivedByMock && !hasCacheGuardHeader && len(content) > 0)
+	stockOk := (stockStatus == http.StatusOK && stockReceivedByMock && !hasStillMarkHeader && len(content) > 0)
 	if stockOk {
 		fmt.Println(">>> STOCK BIFROST RESULT: PASS (Stock gateway runs normally; zero overhead, no leakage)")
 	} else {

@@ -1,6 +1,6 @@
 .PHONY: all build dev clean test demo-real
 
-PLUGIN_NAME = cacheguard
+PLUGIN_NAME = stillmark
 OUTPUT_DIR = build
 OUTPUT = $(OUTPUT_DIR)/$(PLUGIN_NAME).so
 
@@ -11,11 +11,11 @@ clean:
 
 build: clean
 	@mkdir -p $(OUTPUT_DIR)
-	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go insights.go
+	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) .
 
 dev: clean
 	@mkdir -p $(OUTPUT_DIR)
-	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go insights.go
+	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) .
 
 test:
 	go test -v ./...

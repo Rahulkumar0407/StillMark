@@ -19,7 +19,7 @@ import (
 
 func main() {
 	fmt.Println("================================================================================")
-	fmt.Println("      BIFROST CACHEGUARD — 7-STEP REPRODUCIBLE REPRO/DEMO WALKTHROUGH           ")
+	fmt.Println("      BIFROST STILLMARK — 7-STEP REPRODUCIBLE REPRO/DEMO WALKTHROUGH           ")
 	fmt.Println("      (All Provider Metrics Labeled SIMULATED — Zero Paid APIs Required)       ")
 	fmt.Println("================================================================================")
 
@@ -29,11 +29,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	pluginPath := filepath.Join(workspaceRoot, "plugins", "cacheguard", "build", "cacheguard.so")
+	pluginPath := filepath.Join(workspaceRoot, "plugins", "stillmark", "build", "stillmark.so")
 	if _, err := os.Stat(pluginPath); err != nil {
-		fmt.Println("Compiling plugin binary (cacheguard.so)...")
+		fmt.Println("Compiling plugin binary (stillmark.so)...")
 		cmd := exec.Command("make", "build")
-		cmd.Dir = filepath.Join(workspaceRoot, "plugins", "cacheguard")
+		cmd.Dir = filepath.Join(workspaceRoot, "plugins", "stillmark")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Printf("FAIL: Build failed: %v\n%s\n", err, string(out))
 			os.Exit(1)
@@ -120,7 +120,7 @@ func main() {
 	defer mockServer.Close()
 	fmt.Printf("✓ Local Mock AI Provider active on: %s\n", mockBaseURL)
 
-	dataDir := filepath.Join(workspaceRoot, "plugins", "cacheguard", ".demo_data")
+	dataDir := filepath.Join(workspaceRoot, "plugins", "stillmark", ".demo_data")
 	_ = os.RemoveAll(dataDir)
 	_ = os.MkdirAll(dataDir, 0755)
 	defer os.RemoveAll(dataDir)
@@ -131,7 +131,7 @@ func main() {
 	// STEP 1: Bifrost without the plugin
 	// -------------------------------------------------------------------------
 	fmt.Println("\n================================================================================")
-	fmt.Println("STEP 1: Run Stock Bifrost WITHOUT CacheGuard Plugin")
+	fmt.Println("STEP 1: Run Stock Bifrost WITHOUT StillMark Plugin")
 	fmt.Println("================================================================================")
 	_, cleanup1, err := startDemoGateway(workspaceRoot, dataDir, false, "", mockBaseURL, false)
 	if err != nil {
@@ -147,14 +147,14 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status: %d OK\n", status1)
-	fmt.Printf("✓ CacheGuard headers present: %v (expected false)\n", hdr1.Get("X-Cacheguard-Status") != "")
+	fmt.Printf("✓ StillMark headers present: %v (expected false)\n", hdr1.Get("X-Stillmark-Status") != "")
 	fmt.Println("Result: Unmodified Bifrost handles requests normally without plugin overhead.")
 
 	// -------------------------------------------------------------------------
-	// STEP 2: Enable CacheGuard in Bifrost
+	// STEP 2: Enable StillMark in Bifrost
 	// -------------------------------------------------------------------------
 	fmt.Println("\n================================================================================")
-	fmt.Println("STEP 2: Boot Bifrost WITH CacheGuard Shared Object Plugin Loaded")
+	fmt.Println("STEP 2: Boot Bifrost WITH StillMark Shared Object Plugin Loaded")
 	fmt.Println("================================================================================")
 	_, cleanupGateway, err := startDemoGateway(workspaceRoot, dataDir, true, pluginPath, mockBaseURL, true)
 	if err != nil {
@@ -163,7 +163,7 @@ func main() {
 	}
 	defer cleanupGateway()
 	time.Sleep(500 * time.Millisecond)
-	fmt.Println("✓ CacheGuard loaded successfully into stock Bifrost runtime (isolated port 8081).")
+	fmt.Println("✓ StillMark loaded successfully into stock Bifrost runtime (isolated port 8081).")
 
 	// -------------------------------------------------------------------------
 	// STEP 3: First tracked request
@@ -174,16 +174,16 @@ func main() {
 	cachedTokens = 0
 	sessionID := "demo-session-42"
 	status3, hdr3, _, err := sendChat(client, "gpt-4o", "string", map[string]string{
-		"X-Cacheguard-Session-ID": sessionID,
+		"X-Stillmark-Session-ID": sessionID,
 	})
 	if err != nil || status3 != http.StatusOK {
 		fmt.Printf("FAIL Step 3: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status:             %d OK\n", status3)
-	fmt.Printf("✓ X-Cacheguard-Status:     %s\n", hdr3.Get("X-Cacheguard-Status"))
-	fmt.Printf("✓ X-Cacheguard-Diagnosis:  %s\n", hdr3.Get("X-Cacheguard-Diagnosis"))
-	fmt.Printf("✓ X-Cacheguard-Attribution:%s\n", hdr3.Get("X-Cacheguard-Attribution"))
+	fmt.Printf("✓ X-Stillmark-Status:     %s\n", hdr3.Get("X-Stillmark-Status"))
+	fmt.Printf("✓ X-Stillmark-Diagnosis:  %s\n", hdr3.Get("X-Stillmark-Diagnosis"))
+	fmt.Printf("✓ X-Stillmark-Attribution:%s\n", hdr3.Get("X-Stillmark-Attribution"))
 	fmt.Println("Result: Initial baseline request fingerprint recorded in memory.")
 
 	// -------------------------------------------------------------------------
@@ -194,93 +194,93 @@ func main() {
 	fmt.Println("================================================================================")
 	cachedTokens = 150 // Mock SIMULATED provider cache hit
 	status4, hdr4, _, err := sendChat(client, "gpt-4o", "string", map[string]string{
-		"X-Cacheguard-Session-ID": sessionID,
+		"X-Stillmark-Session-ID": sessionID,
 	})
 	if err != nil || status4 != http.StatusOK {
 		fmt.Printf("FAIL Step 4: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status:             %d OK\n", status4)
-	fmt.Printf("✓ X-Cacheguard-Diagnosis:  %s\n", hdr4.Get("X-Cacheguard-Diagnosis"))
-	fmt.Printf("✓ X-Cacheguard-Attribution:%s\n", hdr4.Get("X-Cacheguard-Attribution"))
-	fmt.Printf("✓ X-Cacheguard-Cached-Tokens: %s [SIMULATED]\n", hdr4.Get("X-Cacheguard-Cached-Tokens"))
+	fmt.Printf("✓ X-Stillmark-Diagnosis:  %s\n", hdr4.Get("X-Stillmark-Diagnosis"))
+	fmt.Printf("✓ X-Stillmark-Attribution:%s\n", hdr4.Get("X-Stillmark-Attribution"))
+	fmt.Printf("✓ X-Stillmark-Cached-Tokens: %s [SIMULATED]\n", hdr4.Get("X-Stillmark-Cached-Tokens"))
 	fmt.Println("Result: Request fingerprint remained unchanged; provider cache hit verified.")
 
 	// -------------------------------------------------------------------------
-	// STEP 5: Changed tool schema field (CG001 warning)
+	// STEP 5: Changed tool schema field (SM001 warning)
 	// -------------------------------------------------------------------------
 	fmt.Println("\n================================================================================")
 	fmt.Println("STEP 5: Tool Schema Drift (Type Changed string -> integer)")
 	fmt.Println("================================================================================")
 	cachedTokens = 0 // Invalidation caused by schema drift
 	status5, hdr5, _, err := sendChat(client, "gpt-4o", "integer", map[string]string{
-		"X-Cacheguard-Session-ID": sessionID,
+		"X-Stillmark-Session-ID": sessionID,
 	})
 	if err != nil || status5 != http.StatusOK {
 		fmt.Printf("FAIL Step 5: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status:             %d OK\n", status5)
-	fmt.Printf("✓ X-Cacheguard-Diagnosis:  %s\n", hdr5.Get("X-Cacheguard-Diagnosis"))
-	fmt.Printf("✓ X-Cacheguard-Attribution:%s\n", hdr5.Get("X-Cacheguard-Attribution"))
-	fmt.Printf("✓ X-Cacheguard-Drift-Component: %s\n", hdr5.Get("X-Cacheguard-Drift-Component"))
-	fmt.Printf("✓ X-Cacheguard-Drift-Path: %s\n", hdr5.Get("X-Cacheguard-Drift-Path"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Code: %s\n", hdr5.Get("X-Cacheguard-Finding-Code"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Msg:  %s\n", hdr5.Get("X-Cacheguard-Finding-Message"))
-	fmt.Println("Result: CG001 correctly pinpointed tool schema mutation breaking prompt cache.")
+	fmt.Printf("✓ X-Stillmark-Diagnosis:  %s\n", hdr5.Get("X-Stillmark-Diagnosis"))
+	fmt.Printf("✓ X-Stillmark-Attribution:%s\n", hdr5.Get("X-Stillmark-Attribution"))
+	fmt.Printf("✓ X-Stillmark-Drift-Component: %s\n", hdr5.Get("X-Stillmark-Drift-Component"))
+	fmt.Printf("✓ X-Stillmark-Drift-Path: %s\n", hdr5.Get("X-Stillmark-Drift-Path"))
+	fmt.Printf("✓ X-Stillmark-Finding-Code: %s\n", hdr5.Get("X-Stillmark-Finding-Code"))
+	fmt.Printf("✓ X-Stillmark-Finding-Msg:  %s\n", hdr5.Get("X-Stillmark-Finding-Message"))
+	fmt.Println("Result: SM001 correctly pinpointed tool schema mutation breaking prompt cache.")
 
 	// -------------------------------------------------------------------------
-	// STEP 6: Simulated cache miss with unknown-cause diagnosis (CG003)
+	// STEP 6: Simulated cache miss with unknown-cause diagnosis (SM003)
 	// -------------------------------------------------------------------------
 	fmt.Println("\n================================================================================")
-	fmt.Println("STEP 6: Stable Client Request with SIMULATED Provider Cache Miss (CG003)")
+	fmt.Println("STEP 6: Stable Client Request with SIMULATED Provider Cache Miss (SM003)")
 	fmt.Println("================================================================================")
 	// Reset baseline with "string"
 	sessionID6 := "demo-session-miss-eval"
 	cachedTokens = 0
-	_, _, _, _ = sendChat(client, "gpt-4o", "string", map[string]string{"X-Cacheguard-Session-ID": sessionID6})
+	_, _, _, _ = sendChat(client, "gpt-4o", "string", map[string]string{"X-Stillmark-Session-ID": sessionID6})
 
 	// Stable repeat request, but provider returned 0 cached tokens
 	cachedTokens = 0
 	status6, hdr6, _, err := sendChat(client, "gpt-4o", "string", map[string]string{
-		"X-Cacheguard-Session-ID": sessionID6,
+		"X-Stillmark-Session-ID": sessionID6,
 	})
 	if err != nil || status6 != http.StatusOK {
 		fmt.Printf("FAIL Step 6: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status:             %d OK\n", status6)
-	fmt.Printf("✓ X-Cacheguard-Diagnosis:  %s\n", hdr6.Get("X-Cacheguard-Diagnosis"))
-	fmt.Printf("✓ X-Cacheguard-Attribution:%s\n", hdr6.Get("X-Cacheguard-Attribution"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Code: %s\n", hdr6.Get("X-Cacheguard-Finding-Code"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Msg:  %s\n", hdr6.Get("X-Cacheguard-Finding-Message"))
-	fmt.Println("Result: CG003 correctly diagnosed provider-side miss without blaming client.")
+	fmt.Printf("✓ X-Stillmark-Diagnosis:  %s\n", hdr6.Get("X-Stillmark-Diagnosis"))
+	fmt.Printf("✓ X-Stillmark-Attribution:%s\n", hdr6.Get("X-Stillmark-Attribution"))
+	fmt.Printf("✓ X-Stillmark-Finding-Code: %s\n", hdr6.Get("X-Stillmark-Finding-Code"))
+	fmt.Printf("✓ X-Stillmark-Finding-Msg:  %s\n", hdr6.Get("X-Stillmark-Finding-Message"))
+	fmt.Println("Result: SM003 correctly diagnosed provider-side miss without blaming client.")
 
 	// -------------------------------------------------------------------------
-	// STEP 7: Actual Bifrost Cache-Control Injection (CG002)
+	// STEP 7: Actual Bifrost Cache-Control Injection (SM002)
 	// -------------------------------------------------------------------------
 	fmt.Println("\n================================================================================")
-	fmt.Println("STEP 7: Bifrost Gateway Cache-Control Transformation Detection (CG002)")
+	fmt.Println("STEP 7: Bifrost Gateway Cache-Control Transformation Detection (SM002)")
 	fmt.Println("================================================================================")
 	sessionID7 := "demo-session-anthropic-cg002"
 	status7, hdr7, _, err := sendAnthropicChat(client, map[string]string{
-		"X-Cacheguard-Session-ID": sessionID7,
+		"X-Stillmark-Session-ID": sessionID7,
 	})
 	if err != nil || status7 != http.StatusOK {
 		fmt.Printf("FAIL Step 7: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("✓ HTTP Status:                    %d OK\n", status7)
-	fmt.Printf("✓ X-Cacheguard-Transformation:    %s\n", hdr7.Get("X-Cacheguard-Transformation"))
-	fmt.Printf("✓ X-Cacheguard-Client-Markers:    %s\n", hdr7.Get("X-Cacheguard-Client-Markers"))
-	fmt.Printf("✓ X-Cacheguard-Outbound-Markers:  %s\n", hdr7.Get("X-Cacheguard-Outbound-Markers"))
-	fmt.Printf("✓ X-Cacheguard-Injected-Path:     %s\n", hdr7.Get("X-Cacheguard-Injected-Path"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Code:      %s\n", hdr7.Get("X-Cacheguard-Finding-Code"))
-	fmt.Printf("✓ X-Cacheguard-Finding-Message:   %s\n", hdr7.Get("X-Cacheguard-Finding-Message"))
-	fmt.Println("Result: CG002 proved Bifrost auto-injected Anthropic cache markers.")
+	fmt.Printf("✓ X-Stillmark-Transformation:    %s\n", hdr7.Get("X-Stillmark-Transformation"))
+	fmt.Printf("✓ X-Stillmark-Client-Markers:    %s\n", hdr7.Get("X-Stillmark-Client-Markers"))
+	fmt.Printf("✓ X-Stillmark-Outbound-Markers:  %s\n", hdr7.Get("X-Stillmark-Outbound-Markers"))
+	fmt.Printf("✓ X-Stillmark-Injected-Path:     %s\n", hdr7.Get("X-Stillmark-Injected-Path"))
+	fmt.Printf("✓ X-Stillmark-Finding-Code:      %s\n", hdr7.Get("X-Stillmark-Finding-Code"))
+	fmt.Printf("✓ X-Stillmark-Finding-Message:   %s\n", hdr7.Get("X-Stillmark-Finding-Message"))
+	fmt.Println("Result: SM002 proved Bifrost auto-injected Anthropic cache markers.")
 
 	fmt.Println("\n================================================================================")
-	fmt.Println("               CACHEGUARD 7-STEP DEMO COMPLETED SUCCESSFULLY!                   ")
+	fmt.Println("               STILLMARK 7-STEP DEMO COMPLETED SUCCESSFULLY!                   ")
 	fmt.Println("================================================================================")
 }
 
@@ -311,8 +311,8 @@ func sendChat(client *http.Client, model, nodeIDType string, headers map[string]
 	reqBytes, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
-	req.Header.Set("x-bf-vk", "sk-bf-cacheguard-vk")
+	req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
+	req.Header.Set("x-bf-vk", "sk-bf-stillmark-vk")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -339,8 +339,8 @@ func sendAnthropicChat(client *http.Client, headers map[string]string) (int, htt
 	reqBytes, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", "http://127.0.0.1:8081/v1/chat/completions", bytes.NewReader(reqBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer sk-bf-cacheguard-vk")
-	req.Header.Set("x-bf-vk", "sk-bf-cacheguard-vk")
+	req.Header.Set("Authorization", "Bearer sk-bf-stillmark-vk")
+	req.Header.Set("x-bf-vk", "sk-bf-stillmark-vk")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -361,7 +361,7 @@ func startDemoGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPa
 	if enablePlugin {
 		pluginsList = []map[string]any{
 			{
-				"name":    "cacheguard",
+				"name":    "stillmark",
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
@@ -416,8 +416,8 @@ func startDemoGateway(workspaceRoot, dataDir string, enablePlugin bool, pluginPa
 			"virtual_keys": []map[string]any{
 				{
 					"name":      "Demo Virtual Key",
-					"id":        "vk-cacheguard-demo",
-					"value":     "sk-bf-cacheguard-vk",
+					"id":        "vk-stillmark-demo",
+					"value":     "sk-bf-stillmark-vk",
 					"is_active": true,
 					"provider_configs": []map[string]any{
 						{

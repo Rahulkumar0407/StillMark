@@ -29,7 +29,7 @@ func main() {
 		action          = flag.String("action", "install", "Action to perform: install, uninstall, verify")
 		bifrostDir      = flag.String("bifrost-dir", "", "Path to the Bifrost source checkout")
 		configPath      = flag.String("config-path", "", "Path to Bifrost config.json for activation/deactivation")
-		pluginOutputDir = flag.String("plugin-output-dir", "", "Custom target directory for plugin .so (default: <bifrost-dir>/plugins/cacheguard/build)")
+		pluginOutputDir = flag.String("plugin-output-dir", "", "Custom target directory for plugin .so (default: <bifrost-dir>/plugins/stillmark/build)")
 		dryRun          = flag.Bool("dry-run", false, "Preview actions without modifying any files")
 	)
 	flag.Parse()
@@ -60,7 +60,7 @@ func main() {
 
 func runInstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 	fmt.Println("================================================================================")
-	fmt.Println("              STILLMARK (CACHEGUARD) — ONE-COMMAND INSTALLER                    ")
+	fmt.Println("              STILLMARK (STILLMARK) — ONE-COMMAND INSTALLER                    ")
 	fmt.Println("================================================================================")
 
 	if dryRun {
@@ -106,9 +106,9 @@ func runInstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 	// 4. Determine Plugin Output Directory and File
 	pluginInstallDir := pluginOutputDir
 	if pluginInstallDir == "" {
-		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "cacheguard", "build")
+		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "stillmark", "build")
 	}
-	pluginOutputFile := filepath.Join(pluginInstallDir, "cacheguard.so")
+	pluginOutputFile := filepath.Join(pluginInstallDir, "stillmark.so")
 
 	// Symlink & traversal check on output path
 	checkBase := bifrostDir
@@ -123,14 +123,14 @@ func runInstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 	fmt.Printf("  • Target Plugin Path: %s\n", pluginOutputFile)
 
 	if dryRun {
-		fmt.Printf("[DRY RUN] Would build cacheguard.so and place at %s\n", pluginOutputFile)
+		fmt.Printf("[DRY RUN] Would build stillmark.so and place at %s\n", pluginOutputFile)
 	} else {
 		if err := os.MkdirAll(pluginInstallDir, 0755); err != nil {
 			fmt.Printf("FAIL: Cannot create target directory %s: %v\n", pluginInstallDir, err)
 			os.Exit(1)
 		}
 
-		// Find source directory of cacheguard plugin
+		// Find source directory of stillmark plugin
 		sourceDir, err := os.Getwd()
 		if err != nil {
 			fmt.Printf("FAIL: Cannot determine current working directory: %v\n", err)
@@ -139,14 +139,14 @@ func runInstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 
 		// Build to a temporary file in the same directory first to avoid corrupting/overwriting
 		// any existing valid plugin before build and verification succeed
-		tmpSO := filepath.Join(pluginInstallDir, fmt.Sprintf(".cacheguard.%d.tmp.so", time.Now().UnixNano()))
+		tmpSO := filepath.Join(pluginInstallDir, fmt.Sprintf(".stillmark.%d.tmp.so", time.Now().UnixNano()))
 		defer func() { _ = os.Remove(tmpSO) }()
 
 		fmt.Println("Building plugin shared object (.so)...")
 		buildCmd := exec.Command("go", "build",
 			"-buildmode=plugin",
 			"-o", tmpSO,
-			"main.go", "engine.go",
+			".", // whole package: helper scripts are excluded by their //go:build ignore tags
 		)
 		buildCmd.Dir = sourceDir
 		buildCmd.Env = append(os.Environ(),
@@ -225,7 +225,7 @@ func runInstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 
 func runUninstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 	fmt.Println("================================================================================")
-	fmt.Println("             STILLMARK (CACHEGUARD) — UNINSTALL WORKFLOW                        ")
+	fmt.Println("             STILLMARK (STILLMARK) — UNINSTALL WORKFLOW                        ")
 	fmt.Println("================================================================================")
 
 	if dryRun {
@@ -240,9 +240,9 @@ func runUninstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 
 	pluginInstallDir := pluginOutputDir
 	if pluginInstallDir == "" {
-		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "cacheguard", "build")
+		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "stillmark", "build")
 	}
-	pluginOutputFile := filepath.Join(pluginInstallDir, "cacheguard.so")
+	pluginOutputFile := filepath.Join(pluginInstallDir, "stillmark.so")
 	pluginBuildDir := pluginInstallDir
 
 	// Symlink & traversal check
@@ -269,7 +269,7 @@ func runUninstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 		}
 
 		if dryRun {
-			fmt.Printf("[DRY RUN] Would remove cacheguard entry from %s\n", absConfigPath)
+			fmt.Printf("[DRY RUN] Would remove stillmark entry from %s\n", absConfigPath)
 		} else {
 			if err := deactivatePluginInConfig(absConfigPath); err != nil {
 				fmt.Printf("FAIL: Failed to deactivate plugin in configuration %s: %v\n", absConfigPath, err)
@@ -310,13 +310,13 @@ func runUninstall(bifrostDir, configPath, pluginOutputDir string, dryRun bool) {
 
 func runVerify(bifrostDir, configPath, pluginOutputDir string) {
 	fmt.Println("================================================================================")
-	fmt.Println("              STILLMARK (CACHEGUARD) — VERIFICATION WORKFLOW                    ")
+	fmt.Println("              STILLMARK (STILLMARK) — VERIFICATION WORKFLOW                    ")
 	fmt.Println("================================================================================")
 	pluginInstallDir := pluginOutputDir
 	if pluginInstallDir == "" {
-		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "cacheguard", "build")
+		pluginInstallDir = filepath.Join(bifrostDir, "plugins", "stillmark", "build")
 	}
-	pluginOutputFile := filepath.Join(pluginInstallDir, "cacheguard.so")
+	pluginOutputFile := filepath.Join(pluginInstallDir, "stillmark.so")
 	if fi, err := os.Lstat(pluginOutputFile); err != nil {
 		fmt.Printf("• [Installed State] Plugin NOT installed at %s\n", pluginOutputFile)
 	} else {
@@ -342,7 +342,7 @@ func runVerify(bifrostDir, configPath, pluginOutputDir string) {
 						found := false
 						for _, item := range pluginsList {
 							if m, ok := item.(map[string]any); ok {
-								if name, ok := m["name"].(string); ok && (name == "cacheguard" || name == "stillmark") {
+								if name, ok := m["name"].(string); ok && (name == "stillmark" || name == "stillmark") {
 									enabled, _ := m["enabled"].(bool)
 									fmt.Printf("✓ [Configured State] Registered in %s (enabled: %v)\n", absConfigPath, enabled)
 									found = true
@@ -450,8 +450,8 @@ func verifyPluginBinary(soPath string) error {
 		return fmt.Errorf("symbol 'GetName' does not have signature func() string")
 	}
 	name := getNameFn()
-	if name != "cacheguard" && name != "stillmark" {
-		return fmt.Errorf("unexpected plugin name: got %q, expected 'cacheguard' or 'stillmark'", name)
+	if name != "stillmark" && name != "stillmark" {
+		return fmt.Errorf("unexpected plugin name: got %q, expected 'stillmark' or 'stillmark'", name)
 	}
 
 	// Verify required hook symbols exist
@@ -581,12 +581,12 @@ func activatePluginInConfig(configPath, pluginPath string) error {
 		pluginList = list
 	}
 
-	// Idempotent search: check if cacheguard or stillmark already exists
+	// Idempotent search: check if stillmark or stillmark already exists
 	foundIndex := -1
 	var existingConfig map[string]any
 	for i, item := range pluginList {
 		if m, ok := item.(map[string]any); ok {
-			if name, ok := m["name"].(string); ok && (name == "cacheguard" || name == "stillmark") {
+			if name, ok := m["name"].(string); ok && (name == "stillmark" || name == "stillmark") {
 				foundIndex = i
 				if cfgMap, ok := m["config"].(map[string]any); ok {
 					existingConfig = cfgMap
@@ -608,7 +608,7 @@ func activatePluginInConfig(configPath, pluginPath string) error {
 	mergedConfig["enabled"] = true
 
 	newEntry := map[string]any{
-		"name":    "cacheguard",
+		"name":    "stillmark",
 		"type":    "shared_object",
 		"path":    pluginPath,
 		"enabled": true,
@@ -668,7 +668,7 @@ func deactivatePluginInConfig(configPath string) error {
 	filtered := make([]any, 0, len(list))
 	for _, item := range list {
 		if m, ok := item.(map[string]any); ok {
-			if name, ok := m["name"].(string); ok && (name == "cacheguard" || name == "stillmark") {
+			if name, ok := m["name"].(string); ok && (name == "stillmark" || name == "stillmark") {
 				continue // exclude
 			}
 		}
@@ -689,7 +689,7 @@ func printConfigSnippet(pluginPath string) {
 	snippet := map[string]any{
 		"plugins": []map[string]any{
 			{
-				"name":    "cacheguard",
+				"name":    "stillmark",
 				"type":    "shared_object",
 				"path":    pluginPath,
 				"enabled": true,
