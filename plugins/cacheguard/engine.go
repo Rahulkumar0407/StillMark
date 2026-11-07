@@ -19,6 +19,7 @@ import (
 
 const (
 	domainPrefixPrompt     = "cacheguard:prompt:"
+	domainPrefixMasked     = "cacheguard:prompt-masked:"
 	domainPrefixTool       = "cacheguard:tool:"
 	domainPrefixSchemaPath = "cacheguard:schema-path:"
 
@@ -101,6 +102,10 @@ const (
 	CodeProviderOrModelChanged          = "CG005"
 	CodeMultiMarkerConfigObserved       = "CG006"
 	CodeGatewayBreakpointClamped        = "CG007"
+	CodeSystemPromptChanged             = "CG008"
+	CodeVolatileValueInPrefix           = "CG009"
+	CodeToolsReordered                  = "CG010"
+	CodeToolSerializationChanged        = "CG011"
 )
 
 // DiagnosticFinding represents a human-readable, privacy-safe operator finding.
@@ -127,6 +132,18 @@ type PluginConfig struct {
 	SessionTTL            string `json:"session_ttl"`             // duration string e.g. "30m" (default: "30m")
 	RawOutboundInspection bool   `json:"raw_outbound_inspection"` // default: false (DIAGNOSTIC-ONLY)
 	ExposeSchemaPaths     bool   `json:"expose_schema_paths"`     // default: false (opt-in to expose detailed schema paths in client response headers)
+
+	// Reference prices (USD per million input tokens) used only to estimate the cost of lost cache reuse.
+	// Defaults are a reference point; set them to your provider's published prices.
+	InputPricePerMTok       float64 `json:"input_price_per_mtok"`        // default: 3.00
+	CachedInputPricePerMTok float64 `json:"cached_input_price_per_mtok"` // default: 0.30
+
+	// AutoSession tracks requests without an X-Cacheguard-Session-Id header, grouped by
+	// authenticated tenant + provider + model, so no client changes are needed. default: true
+	AutoSession bool `json:"auto_session"`
+	// ReportAddr serves the operator report (GET /stillmark/report) on this loopback address,
+	// e.g. "127.0.0.1:8099". Empty disables it. Non-loopback addresses are refused. default: ""
+	ReportAddr string `json:"report_addr"`
 }
 
 func DefaultPluginConfig() PluginConfig {
@@ -139,7 +156,25 @@ func DefaultPluginConfig() PluginConfig {
 		SessionTTL:            "30m",
 		RawOutboundInspection: false,
 		ExposeSchemaPaths:     false,
+
+		InputPricePerMTok:       DefaultInputPricePerMTok,
+		CachedInputPricePerMTok: DefaultCachedInputPricePerMTok,
+		AutoSession:             true,
 	}
+}
+
+const (
+	DefaultInputPricePerMTok       = 3.00
+	DefaultCachedInputPricePerMTok = 0.30
+)
+
+// EstimateExtraCostPer1k returns the estimated extra USD per 1,000 requests when tokensLost
+// input tokens are billed at the full input price instead of the cached price.
+func EstimateExtraCostPer1k(tokensLost int, inputPrice, cachedPrice float64) float64 {
+	if tokensLost <= 0 || inputPrice <= cachedPrice {
+		return 0
+	}
+	return float64(tokensLost) * (inputPrice - cachedPrice) / 1e6 * 1000
 }
 
 var (
@@ -343,6 +378,7 @@ type RequestSnapshot struct {
 
 	// Stage A: Client Input (observed in PreLLMHook)
 	PrefixHMAC             string
+	PrefixMaskedHMAC       string // prefix HMAC with volatile values masked
 	ToolsHMAC              string
 	PathHMACs              map[string]string // schema_path -> HMAC(leaf_val)
 	HasSystemPrompt        bool
@@ -359,6 +395,14 @@ type RequestSnapshot struct {
 	OutboundToolCount        int
 	OutboundCacheMarkerCount int
 	OutboundMarkerPaths      []string
+
+	// Byte-exact fingerprints of the top-level "tools" array (key-order-sensitive)
+	ClientToolsRawHMAC   string
+	OutboundToolsRawHMAC string
+
+	// Provider usage recorded with the snapshot (counts only), used to measure cache loss on drift
+	CachedReadTokens int
+	PromptTokens     int
 }
 
 const (
@@ -374,8 +418,46 @@ const (
 // 3. If an explicit cache_control marker is present on any message, that message is part of the prefix.
 // 4. Otherwise, the initial turn messages[0] serves as the baseline prefix.
 func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
-	if chatReq == nil || len(chatReq.Input) == 0 {
+	raw, hasSys := extractPrefixBytes(chatReq)
+	if raw == nil {
 		return "", false
+	}
+	return computeHMAC(domainPrefixPrompt, raw), hasSys
+}
+
+// ExtractPrefixFingerprints returns the prefix HMAC plus a second HMAC computed after masking
+// volatile values (dates, times, UUIDs, epoch timestamps, long hex IDs). If two requests differ
+// in the first HMAC but match in the masked one, the only change was a per-request dynamic value.
+// Raw prompt bytes are never stored or returned.
+func ExtractPrefixFingerprints(chatReq *schemas.BifrostChatRequest) (prefixHMAC, maskedHMAC string, hasSys bool) {
+	raw, hasSys := extractPrefixBytes(chatReq)
+	if raw == nil {
+		return "", "", false
+	}
+	return computeHMAC(domainPrefixPrompt, raw), computeHMAC(domainPrefixMasked, MaskVolatileValues(raw)), hasSys
+}
+
+var volatilePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`),
+	regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`),
+	regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s?[AaPp][Mm])?\b`),
+	regexp.MustCompile(`(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b`),
+	regexp.MustCompile(`\b1[5-9]\d{8}(?:\d{3})?\b`),
+	regexp.MustCompile(`\b[0-9a-fA-F]{16,}\b`),
+}
+
+// MaskVolatileValues replaces values that typically change on every request with a fixed token.
+func MaskVolatileValues(raw []byte) []byte {
+	out := raw
+	for _, re := range volatilePatterns {
+		out = re.ReplaceAll(out, []byte("<v>"))
+	}
+	return out
+}
+
+func extractPrefixBytes(chatReq *schemas.BifrostChatRequest) ([]byte, bool) {
+	if chatReq == nil || len(chatReq.Input) == 0 {
+		return nil, false
 	}
 
 	// 1. Check for explicit system/developer instruction(s) - capture ALL of them in order
@@ -407,7 +489,7 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 		}
 	}
 	if hasSys {
-		return computeHMAC(domainPrefixPrompt, sysBuf.Bytes()), true
+		return sysBuf.Bytes(), true
 	}
 
 	// 2. Check for message with explicit cache-control marker
@@ -423,7 +505,7 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 						b.WriteString(block.ImageURLStruct.URL)
 					}
 					if b.Len() > 0 {
-						return computeHMAC(domainPrefixPrompt, b.Bytes()), true
+						return b.Bytes(), true
 					}
 				}
 			}
@@ -434,7 +516,7 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 	first := chatReq.Input[0]
 	if first.Content != nil {
 		if first.Content.ContentStr != nil {
-			return computeHMAC(domainPrefixPrompt, []byte(*first.Content.ContentStr)), false
+			return []byte(*first.Content.ContentStr), false
 		}
 		if len(first.Content.ContentBlocks) > 0 {
 			var b bytes.Buffer
@@ -447,12 +529,12 @@ func ExtractPrefixSnapshot(chatReq *schemas.BifrostChatRequest) (string, bool) {
 				}
 			}
 			if b.Len() > 0 {
-				return computeHMAC(domainPrefixPrompt, b.Bytes()), false
+				return b.Bytes(), false
 			}
 		}
 	}
 
-	return "", false
+	return nil, false
 }
 
 // CanonicalSchemaFlattener recursively extracts JSON schema paths and computes
@@ -606,13 +688,14 @@ func flattenJSONArray(prefix string, arr []any, dest map[string]string, depth in
 // DriftResult reports the exact component and field-level difference between requests,
 // along with verified attribution (client_input_changed, gateway_output_changed, or origin_unverified).
 type DriftResult struct {
-	Detected    bool
-	Attribution AttributionType // client_input_changed, gateway_output_changed, origin_unverified, or none
-	Component   string          // "system_prompt", "tools", or "none"
-	Path        string          // e.g. "tools[0].function.parameters.properties.node_id.type"
-	ChangeType  string          // "added", "removed", "modified", or "none"
-	Confirmed   bool            // true if cryptographically confirmed difference
-	Reason      string
+	Detected     bool
+	Attribution  AttributionType // client_input_changed, gateway_output_changed, origin_unverified, or none
+	Component    string          // "system_prompt", "tools", or "none"
+	Path         string          // e.g. "tools[0].function.parameters.properties.node_id.type"
+	ChangeType   string          // "added", "removed", "modified", or "none"
+	Confirmed    bool            // true if cryptographically confirmed difference
+	VolatileOnly bool            // true if the only system-prompt change was a dynamic value (timestamp, ID)
+	Reason       string
 }
 
 // CountChatCacheMarkers scans the client-supplied chat request for explicit cache-control markers.
@@ -904,6 +987,17 @@ func compareStage(
 			}
 		}
 
+		if IsToolReorder(prevPaths, currPaths, currToolCount) {
+			return DriftResult{
+				Detected:   true,
+				Component:  "tools",
+				Path:       "tools",
+				ChangeType: "reordered",
+				Confirmed:  true,
+				Reason:     "Same tool definitions sent in a different order",
+			}
+		}
+
 		diffPath, changeType := findFirstPathDiff(prevPaths, currPaths)
 		return DriftResult{
 			Detected:   true,
@@ -939,6 +1033,9 @@ func CompareSnapshots(prev, curr RequestSnapshot) DriftResult {
 	if clientDrift.Detected {
 		clientDrift.Attribution = AttributionClientInputChanged
 		clientDrift.Reason = "Client input changed: " + clientDrift.Reason
+		if clientDrift.Component == "system_prompt" && prev.PrefixMaskedHMAC != "" && prev.PrefixMaskedHMAC == curr.PrefixMaskedHMAC {
+			clientDrift.VolatileOnly = true
+		}
 		return clientDrift
 	}
 
@@ -981,6 +1078,11 @@ func CompareSnapshots(prev, curr RequestSnapshot) DriftResult {
 		outboundDrift.Attribution = AttributionGatewayOutputChanged
 		outboundDrift.Reason = "Gateway transformation changed outbound request: " + outboundDrift.Reason
 		return outboundDrift
+	}
+
+	// Stage 3: content is identical, but are the exact provider-bound bytes identical?
+	if byteDrift, changed := compareToolBytes(prev, curr); changed {
+		return byteDrift
 	}
 
 	return DriftResult{
@@ -1249,7 +1351,46 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 	outboundObservable := diag.Snapshot.OutboundObservable
 
 	// 1. Tool Schema Changed (CG001)
-	if diag.Drift.Detected && diag.Drift.Component == "tools" {
+	if diag.Drift.Detected && diag.Drift.Component == "tools" && diag.Drift.ChangeType == "reordered" {
+		source := EvidenceClientInput
+		if diag.Drift.Attribution == AttributionGatewayOutputChanged {
+			source = EvidenceGatewayState
+		}
+		findings = append(findings, DiagnosticFinding{
+			Code:               CodeToolsReordered,
+			Severity:           SeverityWarning,
+			Component:          "tools",
+			Path:               "tools",
+			EvidenceSource:     source,
+			Confidence:         ConfidenceConfirmed,
+			Message:            "The same tools were sent in a different order. Tool order is part of the cached prompt, so reordering breaks cache reuse even though nothing else changed.",
+			SuggestedAction:    "Sort tools deterministically (e.g. by name) before sending, especially tools discovered from MCP servers.",
+			OutboundObservable: outboundObservable,
+		})
+	} else if diag.Drift.Detected && diag.Drift.Component == "tools" && diag.Drift.ChangeType == "serialization" {
+		f := DiagnosticFinding{
+			Code:               CodeToolSerializationChanged,
+			Severity:           SeverityWarning,
+			Component:          "tools",
+			Path:               "tools",
+			EvidenceSource:     EvidenceProviderOutput,
+			Confidence:         ConfidenceConfirmed,
+			Message:            "The tools sent to the provider had the same content but different JSON bytes (key order) than the previous request. Providers cache exact bytes, so this breaks cache reuse.",
+			SuggestedAction:    "Find which side serializes tool schemas non-deterministically and make key order stable.",
+			OutboundObservable: outboundObservable,
+		}
+		switch diag.Drift.Attribution {
+		case AttributionGatewayOutputChanged:
+			f.EvidenceSource = EvidenceGatewayState
+			f.Message = "Bifrost sent the same tools to the provider with different JSON bytes (key order) than the previous request, although the client sent identical bytes. Providers cache exact bytes, so this breaks cache reuse."
+			f.SuggestedAction = "This points to non-deterministic serialization in the gateway. Report it to the Bifrost maintainers with this finding and your Bifrost version."
+		case AttributionClientInputChanged:
+			f.EvidenceSource = EvidenceClientInput
+			f.Message = "Your client sent the same tools with a different JSON key order than the previous request, and it reached the provider that way. Providers cache exact bytes, so this breaks cache reuse."
+			f.SuggestedAction = "Serialize tool schemas with a stable key order in the client (e.g. sort keys)."
+		}
+		findings = append(findings, f)
+	} else if diag.Drift.Detected && diag.Drift.Component == "tools" {
 		source := EvidenceClientInput
 		if diag.Drift.Attribution == AttributionGatewayOutputChanged {
 			source = EvidenceGatewayState
@@ -1266,6 +1407,31 @@ func BuildDiagnosticFindings(diag *RequestDiagnostic) []DiagnosticFinding {
 			SuggestedAction:    "Keep shared tool definitions consistent across requests when possible.",
 			OutboundObservable: outboundObservable,
 		})
+	}
+
+	// 1b. System prompt changed (CG008), or changed only by a dynamic value (CG009)
+	if diag.Drift.Detected && diag.Drift.Component == "system_prompt" {
+		source := EvidenceClientInput
+		if diag.Drift.Attribution == AttributionGatewayOutputChanged {
+			source = EvidenceGatewayState
+		}
+		f := DiagnosticFinding{
+			Code:               CodeSystemPromptChanged,
+			Severity:           SeverityWarning,
+			Component:          "system_prompt",
+			Path:               SanitizeFieldPath(diag.Drift.Path),
+			EvidenceSource:     source,
+			Confidence:         ConfidenceConfirmed,
+			Message:            "System prompt changed within this session. Providers cache from the start of the prompt, so a change here invalidates the cached prefix after the change point.",
+			SuggestedAction:    "Keep the system prompt identical across requests; put per-request content at the end of the conversation.",
+			OutboundObservable: outboundObservable,
+		}
+		if diag.Drift.VolatileOnly && source == EvidenceClientInput {
+			f.Code = CodeVolatileValueInPrefix
+			f.Message = "The only change to the system prompt was a value that changes on every request (date, time, timestamp or ID). This breaks prompt-cache reuse on every call."
+			f.SuggestedAction = "Move the dynamic value out of the system prompt into the latest user message, or round it (e.g. date only)."
+		}
+		findings = append(findings, f)
 	}
 
 	// 2. Gateway Added a Cache Breakpoint (CG002)
@@ -1407,6 +1573,12 @@ func ValidateAndApplyConfig(raw any) (PluginConfig, error) {
 	}
 	if _, err := time.ParseDuration(cfg.SessionTTL); err != nil {
 		cfg.SessionTTL = "30m"
+	}
+	if cfg.InputPricePerMTok <= 0 || cfg.InputPricePerMTok > 1000 {
+		cfg.InputPricePerMTok = DefaultInputPricePerMTok
+	}
+	if cfg.CachedInputPricePerMTok < 0 || cfg.CachedInputPricePerMTok > cfg.InputPricePerMTok {
+		cfg.CachedInputPricePerMTok = cfg.InputPricePerMTok * 0.1
 	}
 	switch strings.ToLower(cfg.SeverityThreshold) {
 	case "info", "warning", "error":

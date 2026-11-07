@@ -31,7 +31,7 @@ StillMark runs inside the Bifrost gateway pipeline (using `PreLLMHook`, `PostLLM
 - **Fail-Open Fault Tolerance**: Every plugin hook wraps internal operations in panic recovery handlers. Even in the event of an unexpected internal error, client inference requests are never failed or interrupted.
 - **Error & Missing-Usage Protection**: Failed provider requests (HTTP 500, timeouts) are never committed to session history, and missing usage metadata is never falsely labeled as a cache miss.
 - **Verified Within-Request Transformation Detection**: Detects when Bifrost injects or clamps cache-control markers (e.g. Anthropic prompt caching auto-injection) before dispatching to the provider.
-- **Privacy-Safe Human-Readable Diagnostics**: Translates observations into stable codes (`CG001`–`CG007`) with plain-English operator guidance, severity ratings, and actionable troubleshooting steps.
+- **Privacy-Safe Human-Readable Diagnostics**: Translates observations into stable codes (`CG001`–`CG009`) with plain-English operator guidance, severity ratings, and actionable troubleshooting steps.
 - **Safe Rate-Limited Operator Logging**: Emits structured logs directly to `ctx.Log(...)` and standard output, rate-limited per trusted scope to avoid log flooding.
 
 ---
@@ -65,7 +65,7 @@ Client HTTP Request
   ▼
 [PostLLMHook] ────────────► Extract provider usage (prompt_tokens, cached_tokens)
   │                         If outbound body captured, detect gateway transformations
-  │                         Synthesize diagnosis (CG001–CG007) & rate-limited log
+  │                         Synthesize diagnosis (CG001–CG011) & rate-limited log
   ▼
 [ResponseHeadersHook] ────► Attach non-sensitive diagnostic headers (X-Cacheguard-*)
   │
@@ -80,7 +80,7 @@ In HTTP streaming mode (`stream: true`), HTTP response headers (`Content-Type: t
 
 ---
 
-## Diagnostic Findings Reference (CG001–CG007)
+## Diagnostic Findings Reference (CG001–CG011)
 
 | Code | Severity | Component | Evidence Source | Plain-English Explanation | Suggested Operator Action |
 |:---:|:---:|:---:|:---:|:---|:---|
@@ -91,6 +91,10 @@ In HTTP streaming mode (`stream: true`), HTTP response headers (`Content-Type: t
 | **`CG005`** | `info` | `session` | `client_input` | Cache history was isolated because this request used a different provider or model. | Ensure requests within the same cache session target the same provider and model. |
 | **`CG006`** | `info` | `cache_control` | `client_input` | Multiple cache-control breakpoints observed on OpenRouter request. OpenRouter uses only the final breakpoint for Gemini models. | Verify that the final breakpoint corresponds to your intended static prompt prefix. |
 | **`CG007`** | `info` | `cache_control` | `provider_output` | Bifrost reduced the number of cache-control markers before forwarding to the provider. | Ensure client markers do not exceed provider-supported breakpoint limits. |
+| **`CG008`** | `warning` | `system_prompt` | `client_input` | System prompt changed within this session. Providers cache from the start of the prompt, so a change here invalidates the cached prefix after the change point. | Keep the system prompt identical across requests; put per-request content at the end of the conversation. |
+| **`CG009`** | `warning` | `system_prompt` | `client_input` | The only change to the system prompt was a value that changes on every request (date, time, timestamp or ID). This breaks prompt-cache reuse on every call. | Move the dynamic value out of the system prompt into the latest user message, or round it (e.g. date only). |
+| **`CG010`** | `warning` | `tools` | `client_input` | The same tools were sent in a different order. Tool order is part of the cached prompt, so reordering breaks cache reuse even though nothing else changed. | Sort tools deterministically (e.g. by name) before sending, especially tools discovered from MCP servers. |
+| **`CG011`** | `warning` | `tools` | `gateway_state` / `client_input` | The tools sent to the provider had the same content but different JSON bytes (key order) than the previous request. Providers cache exact bytes, so this breaks cache reuse. Attributed to the gateway when the client's bytes were identical, or to the client when they were not. | Make tool-schema key order stable on the side StillMark identifies; for gateway attribution, report it to the Bifrost maintainers. |
 
 ---
 
@@ -99,6 +103,7 @@ In HTTP streaming mode (`stream: true`), HTTP response headers (`Content-Type: t
 When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 
 - `X-Cacheguard-Status`: `active`
+- `X-Cacheguard-Session-Mode`: `explicit` (client sent `X-Cacheguard-Session-Id`) or `auto` (zero-config tracking per virtual key/customer + provider + model).
 - `X-Cacheguard-Observed`: Total count of observed requests by this plugin instance.
 - `X-Cacheguard-Diagnosis`: `initial_request`, `confirmed_drift`, `stable_hit`, `stable_miss`, `untracked`, or `refused`.
 - `X-Cacheguard-Attribution`: `client_input_changed`, `gateway_output_changed`, `origin_unverified`, or `none`.
@@ -110,6 +115,8 @@ When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 - `X-Cacheguard-Finding-Severity`: `info`, `warning`, or `error`.
 - `X-Cacheguard-Finding-Message`: Plain-English explanation.
 - `X-Cacheguard-Cached-Tokens`: Cached token count reported by provider (or mock).
+- `X-Cacheguard-Cache-Tokens-Lost`: On drift, tokens billed at full price instead of the cached price (drop in cached tokens vs. the previous request, or the whole uncached prompt if the previous request was not cached either).
+- `X-Cacheguard-Est-Extra-Cost-Per-1k-Requests-USD`: Estimated extra cost per 1,000 such requests, using the configured reference prices. An estimate, not a bill.
 
 ---
 
@@ -178,7 +185,11 @@ Manual configuration entry for `config.json`:
         "max_sessions": 10000,
         "max_entries_per_session": 10,
         "session_ttl": "30m",
-        "raw_outbound_inspection": false
+        "raw_outbound_inspection": false,
+        "input_price_per_mtok": 3.00,
+        "cached_input_price_per_mtok": 0.30,
+        "auto_session": true,
+        "report_addr": "127.0.0.1:8099"
       }
     }
   ]
@@ -193,6 +204,15 @@ X-Cacheguard-Session-Id: user-session-12345678
 Valid format: 8–64 alphanumeric characters, underscores, or hyphens (`^[a-zA-Z0-9_-]{8,64}$`). Requests without this header pass through normally without session state tracking.
 
 ---
+
+### Byte-Exact Tool Check (`CG011`)
+
+Schema-path fingerprints ignore JSON key order, but provider caches compare exact bytes. When outbound inspection is available (`send_back_raw_request: true`), StillMark also fingerprints the exact bytes of the `tools` array, both as the client sent it and as Bifrost sent it to the provider. If the content is the same but the bytes differ, it reports `CG011` and says who changed them. This is the class of bug behind past Bifrost tool-serialization fixes. In our real-demo check, current Bifrost normalized a client's key-order change before sending (outbound bytes identical), and StillMark correctly reported no drift.
+
+### Zero-Config Mode and Operator Report
+
+- **No client changes needed.** With `auto_session: true` (default), requests without `X-Cacheguard-Session-Id` are still tracked, grouped by authenticated tenant (virtual key or customer) + provider + model. Unauthenticated requests are never tracked. When several apps share one virtual key, StillMark compares each request with the most recent request that has the same system prompt (ignoring dates, times and IDs) or the same tool set. Send an explicit session header for exact per-conversation tracking.
+- **Operator report.** Set `report_addr` (e.g. `"127.0.0.1:8099"`) to serve `GET /stillmark/report`: totals (cache hit ratio, cache-breaking changes, tokens billed at full price, estimated extra USD) and the top cache-breakers ranked by tokens lost. It binds to loopback addresses only, and tenants appear as keyed hash labels, never raw IDs. This also covers streaming requests, whose token counts cannot be sent in response headers.
 
 ## Real Gateway Performance Benchmarks
 
@@ -211,6 +231,25 @@ BenchmarkFlattenToolSchemas-8      11,298 ops  109,314 ns/op    19,788 B/op    2
 BenchmarkSessionTrackerLookup-8 11,687,527 ops    101.7 ns/op        0 B/op      0 allocs/op
 BenchmarkDiagnosticEvaluation-8   461,870 ops    3,131 ns/op       672 B/op     10 allocs/op
 ```
+
+---
+
+## Real Demo: One Command, Free, Offline
+
+`make demo-real` (from `plugins/cacheguard`) sends **real** requests through a **real Bifrost gateway** with StillMark loaded, to a small model running locally with llama.cpp. llama.cpp reuses matching prompt prefixes and reports `prompt_tokens_details.cached_tokens`, so every number in the demo is measured, not simulated. No API keys, no network needed after the first model download.
+
+Prerequisites: `brew install go llama.cpp`, and a Bifrost checkout next to this repo (or set `BIFROST_DIR`).
+
+The demo tells a three-act story:
+1. **The bug:** a timestamp at the top of the system prompt. Every request gets 0% cache reuse; StillMark reports **CG009** and the estimated extra cost.
+2. **The fix:** the timestamp moves to the user message. Cache reuse jumps to ~99.5%.
+3. **A teammate edits one tool description:** StillMark reports **CG001**, names `tools[0].function.description`, and shows the tokens lost.
+4. **An MCP server returns the same tools in a different order:** StillMark reports **CG010**.
+5. **The client sends the same tool schema with a different key order:** Bifrost normalizes it, the cache still hits, and StillMark correctly stays quiet (no false alarm).
+
+The demo app sends no StillMark headers (zero-config mode) and ends by printing the operator report.
+
+Note: llama.cpp's prefix cache is a local stand-in for provider prompt caching. It demonstrates the same mechanism (prefix reuse breaks at the first changed token) but not any provider's billing.
 
 ---
 

@@ -1,4 +1,4 @@
-.PHONY: all build dev clean test
+.PHONY: all build dev clean test demo-real
 
 PLUGIN_NAME = cacheguard
 OUTPUT_DIR = build
@@ -11,11 +11,11 @@ clean:
 
 build: clean
 	@mkdir -p $(OUTPUT_DIR)
-	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go
+	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go insights.go
 
 dev: clean
 	@mkdir -p $(OUTPUT_DIR)
-	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go
+	CGO_ENABLED=1 go build -buildmode=plugin -o $(OUTPUT) main.go engine.go insights.go
 
 test:
 	go test -v ./...
@@ -44,3 +44,6 @@ verify:
 test-installer:
 	go run test_installer.go
 
+
+demo-real:
+	@./demo_real/run.sh

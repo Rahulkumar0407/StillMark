@@ -38,10 +38,14 @@ type RequestDiagnostic struct {
 	PromptTokens       int                   `json:"prompt_tokens"`
 	CachedReadTokens   int                   `json:"cached_read_tokens"`
 	CachedWriteTokens  int                   `json:"cached_write_tokens"`
+	CacheTokensLost    int                   `json:"cache_tokens_lost,omitempty"`     // cached tokens lost vs previous request in session (drift only)
+	EstExtraCostPer1k  float64               `json:"est_extra_cost_per_1k,omitempty"` // estimated extra USD per 1,000 such requests
 	Transformation     TransformationFinding `json:"transformation"`
 	Findings           []DiagnosticFinding   `json:"findings,omitempty"`
 	PrimaryFinding     *DiagnosticFinding    `json:"primary_finding,omitempty"`
 	Snapshot           RequestSnapshot       `json:"-"`
+	AutoSession        bool                  `json:"auto_session,omitempty"` // tracked without a session header
+	reported           bool                  // already counted in the operator report
 }
 
 var (
@@ -85,6 +89,12 @@ func Init(config any) error {
 	if err := InitEngine(cfg.MaxSessions, cfg.MaxEntriesPerSession, ttl); err != nil {
 		return err
 	}
+	globalReportMu.Lock()
+	globalReport = NewInsightReport()
+	globalReportMu.Unlock()
+	stopReportServer()
+	startReportServer(cfg.ReportAddr)
+
 	isInitialized.Store(true)
 	return nil
 }
@@ -104,6 +114,11 @@ func Cleanup() error {
 		globalRateLimiter = nil
 	}
 	globalRateLimiterMu.Unlock()
+
+	stopReportServer()
+	globalReportMu.Lock()
+	globalReport = nil
+	globalReportMu.Unlock()
 
 	CleanupEngine()
 	return nil
@@ -139,6 +154,9 @@ func HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest)
 		Diagnosis:   DiagnosisUntracked,
 		Attribution: AttributionNone,
 	}
+
+	// Byte-exact fingerprint of the client's tools array (used by CG011 attribution)
+	diag.Snapshot.ClientToolsRawHMAC = RawToolsHMAC(req.Body)
 
 	for k, v := range req.Headers {
 		if strings.EqualFold(k, headerSessionID) {
@@ -199,9 +217,10 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (outRe
 		diag.Provider = string(req.ChatRequest.Provider)
 
 		// 1. Process System / Developer instructions or explicit cache prefix safely with HMAC
-		prefixHMAC, hasSys := ExtractPrefixSnapshot(req.ChatRequest)
+		prefixHMAC, maskedHMAC, hasSys := ExtractPrefixFingerprints(req.ChatRequest)
 		diag.HasSystemPrompt = hasSys
 		diag.Snapshot.PrefixHMAC = prefixHMAC
+		diag.Snapshot.PrefixMaskedHMAC = maskedHMAC
 		diag.Snapshot.HasSystemPrompt = hasSys
 
 		// 2. Process Tools and nested schemas safely with canonical path flattening
@@ -235,6 +254,17 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (outRe
 		}
 	}
 
+	// Zero-config mode: no session header, but an authenticated tenant. Track per tenant+provider+model.
+	if sessionID == "" {
+		activeConfigMu.RLock()
+		auto := activeConfig.AutoSession
+		activeConfigMu.RUnlock()
+		if _, trusted := ExtractTrustedTenant(ctx); auto && trusted {
+			sessionID = autoSessionID
+			diag.AutoSession = true
+		}
+	}
+
 	if sessionID != "" {
 		diag.SessionID = sessionID
 		tenantID, trusted := ExtractTrustedTenant(ctx)
@@ -265,7 +295,7 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (outRe
 			globalTrackerMu.RUnlock()
 
 			if tracker != nil {
-				if prev, exists := tracker.GetLatest(compositeKey); exists {
+				if prev, exists := previousSnapshot(tracker, diag); exists {
 					drift := CompareSnapshots(prev, diag.Snapshot)
 					diag.Drift = drift
 					diag.Attribution = drift.Attribution
@@ -328,24 +358,31 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 		diag.Snapshot.OutboundToolCount = toolCount
 		diag.Snapshot.OutboundCacheMarkerCount = markerCount
 		diag.Snapshot.OutboundMarkerPaths = markerPaths
+		diag.Snapshot.OutboundToolsRawHMAC = RawToolsHMAC(rawPayloadBytes(rawReq))
 	}
 
 	// 2. Detect within-request cache-control marker transformations
 	diag.Transformation = DetectTransformation(diag.Snapshot, diag.Provider, diag.Model)
 
 	// 3. Perform two-stage re-evaluation against previous snapshot if available
+	var prevSnap RequestSnapshot
+	hasPrev := false
 	if diag.CompositeKey != "" && diag.TrustedTenant {
 		globalTrackerMu.RLock()
 		tracker := globalTracker
 		globalTrackerMu.RUnlock()
 
 		if tracker != nil {
-			if prev, exists := tracker.GetLatest(diag.CompositeKey); exists {
+			if prev, exists := previousSnapshot(tracker, diag); exists {
+				prevSnap, hasPrev = prev, true
 				drift := CompareSnapshots(prev, diag.Snapshot)
 				diag.Drift = drift
 				diag.Attribution = drift.Attribution
 				if drift.Detected {
 					diag.Diagnosis = DiagnosisConfirmedDrift
+					// Drift found only after inspecting the outbound payload: the request is not stable,
+					// so the usage step below must not overwrite this diagnosis with stable_hit/stable_miss.
+					diag.StructurallyStable = false
 				}
 			}
 		}
@@ -383,6 +420,24 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 			} else {
 				diag.HasPromptDetails = true
 			}
+		}
+
+		// Measure cache reuse lost to drift. If the previous request was cached, the loss is the drop
+		// in cached tokens. If it was not (e.g. a timestamp changes the prefix on every call), the loss
+		// is every token of this request that was billed at full price instead of the cached price.
+		diag.CacheTokensLost, diag.EstExtraCostPer1k = 0, 0
+		if diag.Drift.Detected && diag.HasPromptDetails && hasPrev {
+			if prevSnap.CachedReadTokens > 0 {
+				diag.CacheTokensLost = max(prevSnap.CachedReadTokens-diag.CachedReadTokens, 0)
+			} else {
+				diag.CacheTokensLost = max(diag.PromptTokens-diag.CachedReadTokens, 0)
+			}
+		}
+		if diag.CacheTokensLost > 0 {
+			activeConfigMu.RLock()
+			inPrice, cachedPrice := activeConfig.InputPricePerMTok, activeConfig.CachedInputPricePerMTok
+			activeConfigMu.RUnlock()
+			diag.EstExtraCostPer1k = EstimateExtraCostPer1k(diag.CacheTokensLost, inPrice, cachedPrice)
 		}
 
 		// Finalize diagnosis if structural comparison was stable
@@ -433,12 +488,21 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 		}
 	}
 
+	// 6a. Count the completed request in the operator report (once per request)
+	if bifrostErr == nil && resp != nil && (!isStreaming || isStreamEnd) {
+		recordReport(diag)
+	}
+
 	// 6. Record snapshot into session tracker upon successful turn only (at stream end for streaming, or for complete unary responses)
 	if bifrostErr == nil && resp != nil && diag.CompositeKey != "" && diag.TrustedTenant && (!isStreaming || isStreamEnd) {
 		globalTrackerMu.RLock()
 		tracker := globalTracker
 		globalTrackerMu.RUnlock()
 		if tracker != nil {
+			if diag.HasPromptDetails {
+				diag.Snapshot.CachedReadTokens = diag.CachedReadTokens
+				diag.Snapshot.PromptTokens = diag.PromptTokens
+			}
 			tracker.Record(diag.CompositeKey, diag.Snapshot)
 		}
 	}
@@ -469,6 +533,13 @@ func HTTPTransportResponseHeadersHook(ctx *schemas.BifrostContext, req *schemas.
 				if diag, ok := val.(*RequestDiagnostic); ok {
 					resp.SetHeader("X-Cacheguard-Diagnosis", string(diag.Diagnosis))
 					resp.SetHeader("X-Cacheguard-Attribution", string(diag.Attribution))
+					if diag.SessionID != "" {
+						mode := "explicit"
+						if diag.AutoSession {
+							mode = "auto"
+						}
+						resp.SetHeader("X-Cacheguard-Session-Mode", mode)
+					}
 
 					if diag.DomainChanged {
 						resp.SetHeader("X-Cacheguard-Domain-Changed", "true")
@@ -492,6 +563,10 @@ func HTTPTransportResponseHeadersHook(ctx *schemas.BifrostContext, req *schemas.
 						resp.SetHeader("X-Cacheguard-Prompt-Tokens", fmt.Sprintf("%d", diag.PromptTokens))
 						if diag.HasPromptDetails {
 							resp.SetHeader("X-Cacheguard-Cached-Tokens", fmt.Sprintf("%d", diag.CachedReadTokens))
+						}
+						if diag.CacheTokensLost > 0 {
+							resp.SetHeader("X-Cacheguard-Cache-Tokens-Lost", fmt.Sprintf("%d", diag.CacheTokensLost))
+							resp.SetHeader("X-Cacheguard-Est-Extra-Cost-Per-1k-Requests-USD", fmt.Sprintf("%.2f", diag.EstExtraCostPer1k))
 						}
 					}
 
@@ -551,10 +626,15 @@ func emitPrivacySafeLogs(ctx *schemas.BifrostContext, diag *RequestDiagnostic, c
 			continue
 		}
 
+		costNote := ""
+		if diag.CacheTokensLost > 0 && (f.Code == CodeToolSchemaChanged || f.Code == CodeSystemPromptChanged || f.Code == CodeVolatileValueInPrefix) {
+			costNote = fmt.Sprintf(" cache_tokens_lost=%d est_extra_usd_per_1k=%.2f", diag.CacheTokensLost, diag.EstExtraCostPer1k)
+		}
+
 		// 1. Structured log into BifrostContext
 		if ctx != nil {
-			logMsg := fmt.Sprintf("code=%s severity=%s component=%s path=%s msg=%q action=%q",
-				f.Code, f.Severity, f.Component, f.Path, f.Message, f.SuggestedAction)
+			logMsg := fmt.Sprintf("code=%s severity=%s component=%s path=%s%s msg=%q action=%q",
+				f.Code, f.Severity, f.Component, f.Path, costNote, f.Message, f.SuggestedAction)
 			level := schemas.LogLevelInfo
 			if f.Severity == SeverityWarning {
 				level = schemas.LogLevelWarn
@@ -569,12 +649,13 @@ func emitPrivacySafeLogs(ctx *schemas.BifrostContext, diag *RequestDiagnostic, c
 		if cleanPath == "" {
 			cleanPath = "n/a"
 		}
-		fmt.Printf("[CacheGuard] %s [%s] code=%s component=%s path=%s msg=%q action=%q\n",
+		fmt.Printf("[CacheGuard] %s [%s] code=%s component=%s path=%s%s msg=%q action=%q\n",
 			strings.ToUpper(string(f.Severity)),
 			f.Confidence,
 			f.Code,
 			f.Component,
 			cleanPath,
+			costNote,
 			f.Message,
 			f.SuggestedAction,
 		)
