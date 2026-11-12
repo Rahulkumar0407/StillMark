@@ -1,0 +1,32 @@
+{
+  "name": "@stillmark/cli",
+  "version": "0.1.0",
+  "description": "Installer, verification engine, and diagnostics manager for StillMark prompt-cache integrity plugin in Bifrost",
+  "type": "module",
+  "bin": {
+    "stillmark": "./bin/stillmark.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "bifrost",
+    "stillmark",
+    "cacheguard",
+    "llm",
+    "prompt-caching",
+    "ai-gateway"
+  ],
+  "author": "StillMark Maintainers",
+  "license": "Apache-2.0"
+}
+

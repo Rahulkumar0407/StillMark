@@ -124,6 +124,29 @@ When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 
 ## One-Command Installation & Management
 
+### Option A: Standalone npm CLI (`@stillmark/cli`)
+
+StillMark provides a standalone Node.js CLI tool under `cli/` for automated environment auditing, transactional plugin builds, atomic config management, and live gateway verification:
+
+```bash
+# 1. Environment & Bifrost compatibility audit
+node cli/bin/stillmark.mjs doctor --bifrost /path/to/Bifrost
+
+# 2. Build and register StillMark (with atomic backup & verification)
+node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json
+
+# 3. Dry-run mode (preview without modifying files)
+node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json --dry-run
+
+# 4. Live-verify gateway diagnostics via mock provider
+node cli/bin/stillmark.mjs verify --url http://127.0.0.1:8080 --key <virtual-key>
+
+# 5. Safe one-command uninstall and config rollback
+node cli/bin/stillmark.mjs uninstall --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json
+```
+
+### Option B: Go Installer & Makefile
+
 StillMark includes an auditable, safe Go installer that verifies prerequisites, compiles the `.so` plugin against your exact Bifrost checkout, checks binary symbol compatibility, and safely activates the plugin in `config.json`.
 
 ### Prerequisites

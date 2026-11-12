@@ -63,3 +63,19 @@ jobs:
       - name: Installer tests
         working-directory: bifrost/plugins/stillmark
         run: go run test_installer.go
+
+  cli-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out StillMark
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run CLI tests
+        working-directory: cli
+        run: npm test

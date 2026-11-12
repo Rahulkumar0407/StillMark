@@ -1,7 +1,9 @@
 # Build outputs
 *.so
 build/
-bin/
+/bin/
+*.tgz
+node_modules/
 
 # Temporary test runtime and databases
 .test_data/
