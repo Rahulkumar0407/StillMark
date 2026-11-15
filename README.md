@@ -138,8 +138,8 @@ node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/
 # 3. Dry-run mode (preview without modifying files)
 node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json --dry-run
 
-# 4. Live-verify gateway diagnostics via mock provider
-node cli/bin/stillmark.mjs verify --url http://127.0.0.1:8080 --key <virtual-key>
+# 4. Live-verify the built gateway on an isolated port against a mock provider
+node cli/bin/stillmark.mjs verify --bifrost /path/to/Bifrost
 
 # 5. Safe one-command uninstall and config rollback
 node cli/bin/stillmark.mjs uninstall --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json

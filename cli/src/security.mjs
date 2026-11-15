@@ -20,9 +20,10 @@ export function validatePathWithin(baseDir, targetPath) {
     throw new Error(`Path traversal denied: '${targetPath}' is outside base directory '${baseDir}'`);
   }
 
-  // Check path components for symlinks
+  // Check path components below baseDir for symlinks. Ancestors of baseDir are
+  // operator-chosen (e.g. macOS /var -> /private/var) and are not checked.
   let curr = absTarget;
-  while (curr !== path.dirname(curr)) {
+  while (curr !== absBase && curr !== path.dirname(curr)) {
     if (fs.existsSync(curr)) {
       const stat = fs.lstatSync(curr);
       if (stat.isSymbolicLink()) {

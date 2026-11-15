@@ -29,6 +29,8 @@ Because Go compiles into static machine binaries, native plugins must be compile
 
 ## Quick Start
 
+> **Running from a clone instead of npm?** Replace `npx @stillmark/cli` with `node cli/bin/stillmark.mjs` (from the repo root). No `npm install` is needed — the CLI has zero dependencies.
+
 ### 1. Pre-flight Environment & Checkout Check
 Diagnose your system toolchain, Go workspace, and Bifrost source compatibility:
 
