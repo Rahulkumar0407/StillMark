@@ -88,28 +88,26 @@ export async function inspectBifrostCheckout(bifrostPath) {
     };
   }
 
-  // Check if this is a Go source checkout
-  const hasGoWork = fs.existsSync(path.join(absPath, 'go.work'));
+  // A buildable Bifrost source checkout (go.work is git-ignored, so it is not required)
   const hasTransports = fs.existsSync(path.join(absPath, 'transports', 'bifrost-http'));
   const hasCore = fs.existsSync(path.join(absPath, 'core', 'go.mod'));
+  const hasPluginsDir = fs.existsSync(path.join(absPath, 'plugins'));
 
-  if (!hasGoWork || !hasTransports || !hasCore) {
-    // Check if it's a directory containing only a precompiled binary
-    const hasBin = fs.existsSync(path.join(absPath, 'bifrost-http')) || fs.existsSync(path.join(absPath, 'bifrost'));
+  if (!hasTransports || !hasCore || !hasPluginsDir) {
     return {
       exists: true,
       absPath,
       scenario: 'C',
-      scenarioName: 'Official Precompiled Binary or Incomplete Directory',
+      scenarioName: 'Precompiled Binary or Incomplete Directory',
       reasons: [
-        'Directory lacks Bifrost Go workspace files (go.work, core/go.mod, transports/bifrost-http).',
-        'Native plugins require Go source code to compile into the gateway binary.'
+        'Directory is not a Bifrost source checkout (needs core/go.mod, transports/bifrost-http, plugins/).',
+        'StillMark is a Go plugin and must be compiled against the same Bifrost source as the gateway.',
+        'Get one with: git clone https://github.com/maximhq/bifrost.git'
       ],
       supported: false
     };
   }
 
-  // Detect Git revision if present
   let gitRevision = 'unknown';
   try {
     const { stdout } = await runCommand('git', ['rev-parse', '--short', 'HEAD'], { cwd: absPath });
@@ -118,102 +116,24 @@ export async function inspectBifrostCheckout(bifrostPath) {
     // Not a git repo or git not available
   }
 
-  // Check for Native StillMark presence
-  const stillmarkDir = path.join(absPath, 'plugins', 'stillmark');
-  const hasStillmarkSource = fs.existsSync(stillmarkDir) && fs.existsSync(path.join(stillmarkDir, 'stillmark.go'));
-
-  // Check for StillMark registration in server/plugins.go
-  const pluginsGoPath = path.join(absPath, 'transports', 'bifrost-http', 'server', 'plugins.go');
-  let isPluginsGoRegistered = false;
-  if (fs.existsSync(pluginsGoPath)) {
-    const pluginsGoContent = fs.readFileSync(pluginsGoPath, 'utf8');
-    isPluginsGoRegistered = pluginsGoContent.includes('stillmark.PluginName') && pluginsGoContent.includes('plugins/stillmark');
-  }
-
-  // Check for StillMark in go.work
+  const pluginDir = path.join(absPath, 'plugins', 'stillmark');
   const goWorkPath = path.join(absPath, 'go.work');
-  let isGoWorkRegistered = false;
-  if (fs.existsSync(goWorkPath)) {
-    const goWorkContent = fs.readFileSync(goWorkPath, 'utf8');
-    isGoWorkRegistered = goWorkContent.includes('./plugins/stillmark');
-  }
-
-  // Check for Legacy CacheGuard presence
-  const cacheguardDir = path.join(absPath, 'plugins', 'cacheguard');
-  const hasLegacySource = fs.existsSync(cacheguardDir) && fs.existsSync(path.join(cacheguardDir, 'main.go'));
-
-  if (hasStillmarkSource && isPluginsGoRegistered && isGoWorkRegistered) {
-    return {
-      exists: true,
-      absPath,
-      gitRevision,
-      scenario: 'A',
-      scenarioName: 'Compatible Bifrost Source with Native StillMark',
-      supported: true,
-      details: {
-        hasStillmarkSource,
-        isPluginsGoRegistered,
-        isGoWorkRegistered,
-        hasLegacySource
-      }
-    };
-  }
-
-  if (!hasStillmarkSource || !isPluginsGoRegistered || !isGoWorkRegistered) {
-    const missingItems = [];
-    if (!hasStillmarkSource) missingItems.push('plugins/stillmark directory and source files');
-    if (!isPluginsGoRegistered) missingItems.push('plugin registration in transports/bifrost-http/server/plugins.go');
-    if (!isGoWorkRegistered) missingItems.push('./plugins/stillmark entry in go.work');
-
-    // Check if legacy source is present
-    if (hasLegacySource) {
-      return {
-        exists: true,
-        absPath,
-        gitRevision,
-        scenario: 'D',
-        scenarioName: 'Bifrost Source with Legacy CacheGuard (.so plugin)',
-        supported: false,
-        legacySupported: true,
-        reasons: [
-          'Native StillMark is not registered, but legacy CacheGuard (.so) was detected.',
-          'To install legacy shared-object plugin, pass --legacy.',
-          'Warning: Shared-object plugins (.so) require CGO and exact compiler ABI matching.'
-        ],
-        details: {
-          missingItems,
-          hasLegacySource
-        }
-      };
-    }
-
-    return {
-      exists: true,
-      absPath,
-      gitRevision,
-      scenario: 'B',
-      scenarioName: 'Clean Bifrost Source Checkout without StillMark',
-      supported: false,
-      reasons: [
-        'Native StillMark is not registered in this Bifrost checkout.',
-        `Missing: ${missingItems.join(', ')}.`,
-        'To install, checkout the StillMark branch (e.g. feat/cacheguard) or apply the StillMark patch.',
-        'Arbitrary source code patching is rejected to protect codebase integrity.'
-      ],
-      details: {
-        missingItems,
-        hasLegacySource
-      }
-    };
-  }
+  const hasGoWork = fs.existsSync(goWorkPath);
 
   return {
     exists: true,
     absPath,
-    scenario: 'UNKNOWN',
-    scenarioName: 'Unrecognized Configuration',
-    supported: false,
-    reasons: ['Unable to determine Bifrost integration state.']
+    gitRevision,
+    scenario: 'A',
+    scenarioName: 'Bifrost Source Checkout',
+    supported: true,
+    details: {
+      stillmarkPresent: fs.existsSync(path.join(pluginDir, 'main.go')),
+      pluginBuilt: fs.existsSync(path.join(pluginDir, 'build', 'stillmark.so')),
+      gatewayBuilt: fs.existsSync(path.join(absPath, 'dist', 'bifrost-http')),
+      hasGoWork,
+      goWorkHasStillmark: hasGoWork && /\.\/plugins\/stillmark\b/.test(fs.readFileSync(goWorkPath, 'utf8'))
+    }
   };
 }
 
@@ -269,8 +189,7 @@ export async function runDoctor(options = {}) {
     environment: env,
     bifrost,
     config: configInfo,
-    canInstallNative: Boolean(env.go.ok && bifrost && bifrost.supported && bifrost.scenario === 'A'),
-    canInstallLegacy: Boolean(env.go.ok && bifrost && bifrost.details && bifrost.details.hasLegacySource)
+    canInstall: Boolean(env.node.ok && env.go.ok && bifrost && bifrost.supported)
   };
 }
 

@@ -33,70 +33,40 @@ test('doctor: inspectBifrostCheckout detects Scenario C (Binary only)', async ()
   }
 });
 
-test('doctor: inspectBifrostCheckout detects Scenario B (Clean source without StillMark)', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-clean-src-'));
+function scaffoldBifrost(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.mkdirSync(path.join(dir, 'core'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
+  fs.mkdirSync(path.join(dir, 'transports', 'bifrost-http'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'plugins', 'governance'), { recursive: true });
+  return dir;
+}
+
+test('doctor: stock source checkout without go.work is installable (StillMark not yet present)', async () => {
+  const tmpDir = scaffoldBifrost('stillmark-clean-src-');
   try {
-    // Scaffold minimal clean Bifrost source
-    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports )\n');
-    fs.mkdirSync(path.join(tmpDir, 'core'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
-    fs.mkdirSync(path.join(tmpDir, 'transports', 'bifrost-http', 'server'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, 'transports', 'bifrost-http', 'server', 'plugins.go'),
-      'package server\nfunc loadBuiltinPlugins() {}\n'
-    );
-
-    const res = await inspectBifrostCheckout(tmpDir);
-    assert.equal(res.scenario, 'B');
-    assert.equal(res.supported, false);
-    assert.ok(res.reasons.some((r) => r.includes('Native StillMark is not registered')));
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('doctor: inspectBifrostCheckout detects Scenario A (Compatible source with StillMark)', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-compat-src-'));
-  try {
-    // Scaffold compatible Bifrost source
-    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports ./plugins/stillmark )\n');
-    fs.mkdirSync(path.join(tmpDir, 'core'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
-    fs.mkdirSync(path.join(tmpDir, 'transports', 'bifrost-http', 'server'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, 'transports', 'bifrost-http', 'server', 'plugins.go'),
-      'package server\nimport "github.com/maximhq/bifrost/plugins/stillmark"\nfunc load() { _ = stillmark.PluginName }\n'
-    );
-    fs.mkdirSync(path.join(tmpDir, 'plugins', 'stillmark'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'plugins', 'stillmark', 'stillmark.go'), 'package stillmark\n');
-
     const res = await inspectBifrostCheckout(tmpDir);
     assert.equal(res.scenario, 'A');
     assert.equal(res.supported, true);
+    assert.equal(res.details.stillmarkPresent, false);
+    assert.equal(res.details.hasGoWork, false);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('doctor: inspectBifrostCheckout detects Scenario D (Legacy CacheGuard)', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-legacy-src-'));
+test('doctor: detects StillMark source and go.work registration already present', async () => {
+  const tmpDir = scaffoldBifrost('stillmark-compat-src-');
   try {
-    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports )\n');
-    fs.mkdirSync(path.join(tmpDir, 'core'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
-    fs.mkdirSync(path.join(tmpDir, 'transports', 'bifrost-http', 'server'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, 'transports', 'bifrost-http', 'server', 'plugins.go'),
-      'package server\nfunc loadBuiltinPlugins() {}\n'
-    );
-    fs.mkdirSync(path.join(tmpDir, 'plugins', 'cacheguard'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'plugins', 'cacheguard', 'main.go'), 'package main\n');
+    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports ./plugins/stillmark )\n');
+    fs.mkdirSync(path.join(tmpDir, 'plugins', 'stillmark'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'plugins', 'stillmark', 'main.go'), 'package main\n');
 
     const res = await inspectBifrostCheckout(tmpDir);
-    assert.equal(res.scenario, 'D');
-    assert.equal(res.legacySupported, true);
+    assert.equal(res.supported, true);
+    assert.equal(res.details.stillmarkPresent, true);
+    assert.equal(res.details.goWorkHasStillmark, true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
-

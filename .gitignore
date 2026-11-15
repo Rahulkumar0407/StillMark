@@ -22,3 +22,6 @@ config.json
 .idea/
 .vscode/
 *.swp
+
+# CLI: plugin source bundled at npm pack time
+cli/plugin/

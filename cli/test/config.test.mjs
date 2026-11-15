@@ -70,7 +70,7 @@ test('config: activateStillmarkConfig preserves unrelated plugins and operator s
     };
     fs.writeFileSync(configPath, JSON.stringify(initialConfig, null, 2), { mode: 0o600 });
 
-    const res = activateStillmarkConfig(configPath);
+    const res = activateStillmarkConfig(configPath, { pluginPath: '/opt/bifrost/plugins/stillmark/build/stillmark.so' });
     assert.ok(fs.existsSync(res.backupPath));
 
     const updated = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -81,6 +81,8 @@ test('config: activateStillmarkConfig preserves unrelated plugins and operator s
     const sm = updated.plugins[1];
     assert.equal(sm.name, 'stillmark');
     assert.equal(sm.enabled, true);
+    assert.equal(sm.type, 'shared_object');
+    assert.equal(sm.path, '/opt/bifrost/plugins/stillmark/build/stillmark.so');
     assert.equal(sm.config.custom_operator_key, 'preserve-me', 'Operator custom settings must be preserved');
     assert.equal(sm.config.max_sessions, 42, 'Existing operator config values must be preserved');
   } finally {
@@ -95,7 +97,7 @@ test('config: activateStillmarkConfig rejects malformed plugins section', () => 
     fs.writeFileSync(configPath, JSON.stringify({ plugins: 'not-an-array' }), { mode: 0o600 });
 
     assert.throws(() => {
-      activateStillmarkConfig(configPath);
+      activateStillmarkConfig(configPath, { pluginPath: '/opt/stillmark.so' });
     }, /'plugins' property must be an array/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

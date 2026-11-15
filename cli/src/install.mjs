@@ -1,125 +1,80 @@
 import path from 'node:path';
 import { runDoctor } from './doctor.mjs';
-import { buildNativeGateway, buildLegacyPlugin } from './builder.mjs';
+import { resolvePluginSource, syncPluginSource, ensureWorkspace, buildGatewayAndPlugin } from './builder.mjs';
 import { activateStillmarkConfig } from './config.mjs';
 import { runGatewayVerification } from './verify.mjs';
 
 /**
- * Runs the end-to-end install workflow.
+ * Installs StillMark into a Bifrost source checkout:
+ * copy plugin source -> register in go.work -> build gateway + stillmark.so
+ * -> (optional) activate in config.json -> verify on an isolated gateway.
  * @param {object} options
+ * @param {(msg: string) => void} [onStep] progress callback
  */
-export async function runInstall(options = {}) {
+export async function runInstall(options = {}, onStep = () => {}) {
   const {
     bifrostPath,
     configPath,
+    pluginSrc = '',
     dryRun = false,
     verbose = false,
-    legacy = false,
     skipVerify = false,
-    outputDir = '',
+    port,
     customConfig = {}
   } = options;
 
   if (!bifrostPath) {
-    throw new Error('Missing required option: --bifrost <path> (path to Bifrost source directory)');
+    throw new Error('Missing required option: --bifrost <path> (path to a Bifrost source checkout)');
   }
-
   const absBifrost = path.resolve(bifrostPath);
 
-  // 1. Run Pre-flight Doctor Checks
-  const docResult = await runDoctor({
-    bifrostPath: absBifrost,
-    configPath
-  });
-
-  if (!docResult.environment.go.ok) {
-    throw new Error(`Incompatible Go toolchain: ${docResult.environment.go.version}. StillMark requires Go 1.22+.`);
+  // 1. Pre-flight checks
+  const doc = await runDoctor({ bifrostPath: absBifrost, configPath });
+  if (!doc.environment.go.ok) {
+    throw new Error(`Incompatible Go toolchain: ${doc.environment.go.version}. StillMark requires Go 1.22+.`);
+  }
+  if (!doc.bifrost || !doc.bifrost.supported) {
+    const b = doc.bifrost || {};
+    throw new Error(
+      `Installation Blocked [Scenario ${b.scenario || 'UNKNOWN'}: ${b.scenarioName || 'Invalid Path'}]\n\n` +
+        (b.reasons || []).join('\n')
+    );
   }
 
-  if (!legacy) {
-    if (!docResult.canInstallNative) {
-      const scenario = docResult.bifrost ? docResult.bifrost.scenario : 'UNKNOWN';
-      const scenarioName = docResult.bifrost ? docResult.bifrost.scenarioName : 'Invalid Path';
-      const reasons = docResult.bifrost && docResult.bifrost.reasons ? docResult.bifrost.reasons.join('\n') : '';
+  const results = { bifrostPath: absBifrost, dryRun, source: null, workspace: null, built: null, configured: null, verified: null };
 
-      throw new Error(
-        `Installation Blocked [Scenario ${scenario}: ${scenarioName}]\n\n${reasons}\n\n` +
-          `Remedy: To use native StillMark, ensure you are running on a Bifrost source checkout with native StillMark registered.\n` +
-          `(If testing legacy .so plugin, specify --legacy explicitly).`
-      );
-    }
-  } else {
-    if (!docResult.canInstallLegacy) {
-      throw new Error(`Legacy installation requested (--legacy) but legacy plugin source (plugins/cacheguard) was not found.`);
-    }
-  }
+  // 2. Copy plugin source into the checkout
+  const srcDir = resolvePluginSource(pluginSrc);
+  onStep(`Copying StillMark plugin source from ${srcDir}`);
+  const sync = syncPluginSource(srcDir, absBifrost, { dryRun });
+  results.source = { from: srcDir, to: sync.pluginDir, files: sync.copied.length, removedStale: sync.removed };
 
-  const results = {
-    mode: legacy ? 'legacy_shared_object' : 'native_compile_time',
-    scenario: docResult.bifrost.scenario,
-    bifrostPath: absBifrost,
-    built: null,
-    configured: null,
-    verified: null
-  };
+  // 3. Go workspace
+  onStep('Registering plugin in go.work');
+  results.workspace = await ensureWorkspace(absBifrost, { dryRun });
 
-  // 2. Build Stage
-  let buildRes;
-  if (!legacy) {
-    buildRes = await buildNativeGateway(absBifrost, {
-      outputDir,
-      dryRun,
-      verbose
-    });
-  } else {
-    buildRes = await buildLegacyPlugin(absBifrost, {
-      dryRun
-    });
-  }
+  // 4. Build gateway and plugin from the same source tree
+  onStep('Building Bifrost gateway and stillmark.so (first build can take a few minutes)');
+  const built = await buildGatewayAndPlugin(absBifrost, { dryRun });
+  results.built = built;
 
-  results.built = {
-    success: buildRes.success,
-    binaryPath: buildRes.binaryPath,
-    dryRun: buildRes.dryRun
-  };
-
-  // 3. Configuration Stage (if --config provided)
+  // 5. Activate in config.json
   if (configPath) {
-    const configRes = activateStillmarkConfig(configPath, {
-      dryRun,
-      legacy,
-      legacyPluginPath: buildRes.binaryPath,
-      customConfig
-    });
-
-    results.configured = {
-      configPath: configRes.configPath,
-      backupPath: configRes.backupPath,
-      entry: configRes.activatedEntry,
-      dryRun
-    };
+    onStep(`Activating StillMark in ${configPath}`);
+    const cfg = activateStillmarkConfig(configPath, { dryRun, pluginPath: built.soPath, customConfig });
+    results.configured = { configPath: cfg.configPath, backupPath: cfg.backupPath, entry: cfg.activatedEntry, dryRun };
   }
 
-  // 4. Verification Stage (isolated gateway test)
+  // 6. Verify on an isolated gateway with a local mock provider
   if (!skipVerify && !dryRun) {
+    onStep('Verifying on an isolated gateway with a local mock provider');
     try {
-      const verifyRes = await runGatewayVerification(buildRes.binaryPath, {
-        verbose,
-        legacy
-      });
-      results.verified = {
-        success: verifyRes.success,
-        port: verifyRes.port,
-        checks: verifyRes.checks
-      };
+      const v = await runGatewayVerification(built, { verbose, preferredPort: port });
+      results.verified = { success: v.success, port: v.port, checks: v.checks };
     } catch (err) {
-      results.verified = {
-        success: false,
-        error: err.message
-      };
+      results.verified = { success: false, error: err.message, checks: [] };
     }
   }
 
   return results;
 }
-

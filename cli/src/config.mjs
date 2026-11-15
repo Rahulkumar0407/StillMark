@@ -113,7 +113,10 @@ export function readBifrostConfig(configPath) {
  * @param {object} options
  */
 export function activateStillmarkConfig(configPath, options = {}) {
-  const { dryRun = false, legacy = false, legacyPluginPath = '', customConfig = {} } = options;
+  const { dryRun = false, pluginPath = '', customConfig = {} } = options;
+  if (!pluginPath) {
+    throw new Error('activateStillmarkConfig requires pluginPath (absolute path to stillmark.so)');
+  }
   const cfg = readBifrostConfig(configPath);
   const { absPath, stat, rawContent, data } = cfg;
 
@@ -126,8 +129,7 @@ export function activateStillmarkConfig(configPath, options = {}) {
     pluginsList = [...data.plugins];
   }
 
-  // Check if StillMark or CacheGuard entry already exists
-  const targetName = legacy ? 'cacheguard' : 'stillmark';
+  // Replace an existing StillMark (or legacy CacheGuard) entry in place
   const existingIdx = pluginsList.findIndex(
     (p) => typeof p === 'object' && p !== null && (p.name === 'stillmark' || p.name === 'cacheguard')
   );
@@ -150,19 +152,13 @@ export function activateStillmarkConfig(configPath, options = {}) {
     ...customConfig
   };
 
-  const newPluginEntry = legacy
-    ? {
-        name: 'cacheguard',
-        type: 'shared_object',
-        path: legacyPluginPath,
-        enabled: true,
-        config: mergedPluginConfig
-      }
-    : {
-        name: 'stillmark',
-        enabled: true,
-        config: mergedPluginConfig
-      };
+  const newPluginEntry = {
+    name: 'stillmark',
+    type: 'shared_object',
+    path: path.resolve(pluginPath),
+    enabled: true,
+    config: mergedPluginConfig
+  };
 
   if (existingIdx >= 0) {
     pluginsList[existingIdx] = newPluginEntry;

@@ -97,14 +97,18 @@ async function waitForHealth(port, timeoutMs = 45000) {
 
 /**
  * Runs live end-to-end verification of an isolated gateway and StillMark.
- * @param {string} binaryPath
+ * @param {{gatewayPath: string, soPath: string}} artifacts
  * @param {object} options
  */
-export async function runGatewayVerification(binaryPath, options = {}) {
-  const { preferredPort = 8086, verbose = false, legacy = false } = options;
+export async function runGatewayVerification(artifacts, options = {}) {
+  const { preferredPort = 8086, verbose = false } = options;
+  const { gatewayPath: binaryPath, soPath } = artifacts;
 
   if (!fs.existsSync(binaryPath)) {
     throw new Error(`Cannot verify: Gateway binary not found at '${binaryPath}'`);
+  }
+  if (!fs.existsSync(soPath)) {
+    throw new Error(`Cannot verify: StillMark plugin not found at '${soPath}'`);
   }
 
   // 1. Start mock provider
@@ -121,28 +125,23 @@ export async function runGatewayVerification(binaryPath, options = {}) {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-verify-'));
   const testConfigPath = path.join(testDir, 'config.json');
 
-  const pluginEntry = legacy
-    ? {
-        name: 'cacheguard',
-        type: 'shared_object',
-        path: path.resolve(binaryPath, '..', '..', 'plugins', 'cacheguard', 'build', 'cacheguard.so'),
-        enabled: true,
-        config: { diagnostic_logging: true }
-      }
-    : {
-        name: 'stillmark',
-        enabled: true,
-        config: {
-          max_sessions: 1000,
-          session_ttl: '10m',
-          diagnostic_logging: true,
-          expose_schema_paths: false
-        }
-      };
+  const pluginEntry = {
+    name: 'stillmark',
+    type: 'shared_object',
+    path: soPath,
+    enabled: true,
+    config: {
+      max_sessions: 1000,
+      session_ttl: '10m',
+      diagnostic_logging: true,
+      expose_schema_paths: false,
+      auto_session: false // so the untracked check below sees a header-less request pass through
+    }
+  };
 
   const testConfig = {
-    client: {
-      port: gatewayPort,
+    client_config: {
+      port: String(gatewayPort),
       host: '127.0.0.1',
       enforce_auth_on_inference: true
     },
@@ -174,7 +173,8 @@ export async function runGatewayVerification(binaryPath, options = {}) {
           }
         ],
         network_config: {
-          base_url: mockProvider.url
+          base_url: mockProvider.url,
+          allow_private_network: true // the mock provider listens on 127.0.0.1
         }
       }
     },
@@ -230,8 +230,7 @@ export async function runGatewayVerification(binaryPath, options = {}) {
         headers: {
           'Content-Type': 'application/json',
           'x-bf-vk': 'sk-bf-verify-key',
-          'X-Stillmark-Session-ID': sessionID,
-          'X-Cacheguard-Session-ID': sessionID
+          'X-Stillmark-Session-Id': sessionID
         }
       },
       payloadTurn1
@@ -245,15 +244,15 @@ export async function runGatewayVerification(binaryPath, options = {}) {
 
     const check1Pass =
       resTurn1.statusCode === 200 &&
-      (resTurn1.headers['x-stillmark-status'] === 'active' || resTurn1.headers['x-cacheguard-status'] === 'active') &&
-      (resTurn1.headers['x-stillmark-diagnosis'] === 'initial_request' || resTurn1.headers['x-cacheguard-diagnosis'] === 'initial_request');
+      resTurn1.headers['x-stillmark-status'] === 'active' &&
+      resTurn1.headers['x-stillmark-diagnosis'] === 'initial_request';
 
     testChecks.push({
       name: 'Initial Turn Baseline Recording',
       passed: check1Pass,
       status: resTurn1.statusCode,
-      stillmarkStatus: resTurn1.headers['x-stillmark-status'] || resTurn1.headers['x-cacheguard-status'],
-      diagnosis: resTurn1.headers['x-stillmark-diagnosis'] || resTurn1.headers['x-cacheguard-diagnosis']
+      stillmarkStatus: resTurn1.headers['x-stillmark-status'],
+      diagnosis: resTurn1.headers['x-stillmark-diagnosis']
     });
 
     // 6. Test Check 2: Tracked Request (Turn 2 - Structurally Stable Repeat)
@@ -266,14 +265,13 @@ export async function runGatewayVerification(binaryPath, options = {}) {
         headers: {
           'Content-Type': 'application/json',
           'x-bf-vk': 'sk-bf-verify-key',
-          'X-Stillmark-Session-ID': sessionID,
-          'X-Cacheguard-Session-ID': sessionID
+          'X-Stillmark-Session-Id': sessionID
         }
       },
       payloadTurn1
     );
 
-    const diagTurn2 = resTurn2.headers['x-stillmark-diagnosis'] || resTurn2.headers['x-cacheguard-diagnosis'];
+    const diagTurn2 = resTurn2.headers['x-stillmark-diagnosis'];
     const check2Pass =
       resTurn2.statusCode === 200 &&
       ['structurally_stable', 'stable_hit', 'stable_miss'].includes(diagTurn2);
@@ -283,6 +281,41 @@ export async function runGatewayVerification(binaryPath, options = {}) {
       passed: check2Pass,
       status: resTurn2.statusCode,
       diagnosis: diagTurn2
+    });
+
+    // Check: a changed system prompt in the same session must be flagged as cache-breaking drift
+    const payloadDrift = JSON.stringify({
+      model: 'openai/mock-gpt-4o',
+      messages: [
+        { role: 'system', content: 'You are a test assistant. Updated instructions.' },
+        { role: 'user', content: 'Verify Turn 1' }
+      ]
+    });
+    const resDrift = await sendRequest(
+      {
+        host: '127.0.0.1',
+        port: gatewayPort,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-bf-vk': 'sk-bf-verify-key',
+          'X-Stillmark-Session-Id': sessionID
+        }
+      },
+      payloadDrift
+    );
+    const diagDrift = resDrift.headers['x-stillmark-diagnosis'];
+    testChecks.push({
+      name: 'Changed System Prompt Flagged as Drift',
+      passed:
+        resDrift.statusCode === 200 &&
+        diagDrift === 'confirmed_drift' &&
+        resDrift.headers['x-stillmark-drift-component'] === 'system_prompt',
+      status: resDrift.statusCode,
+      diagnosis: diagDrift,
+      component: resDrift.headers['x-stillmark-drift-component'],
+      findingCode: resDrift.headers['x-stillmark-finding-code']
     });
 
     // 7. Test Check 3: Untracked Request (No Session ID)

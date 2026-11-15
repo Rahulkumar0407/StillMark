@@ -32,14 +32,22 @@ demo:
 integration:
 	go run run_integration.go
 
+# install / uninstall / verify use the StillMark CLI (same code path as `npx stillmark`).
+# From this repo it runs ../../cli; from a copy inside Bifrost it falls back to npx.
+STILLMARK_CLI := $(if $(wildcard ../../cli/bin/stillmark.mjs),node ../../cli/bin/stillmark.mjs,npx -y stillmark)
+REQUIRE_BIFROST_DIR = @test -n "$(BIFROST_DIR)" || { echo "Set BIFROST_DIR=/path/to/bifrost (a Bifrost source checkout)"; exit 1; }
+
 install:
-	@go run installer.go -action=install -bifrost-dir="$(BIFROST_DIR)" $(if $(CONFIG_PATH),-config-path="$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),-dry-run,)
+	$(REQUIRE_BIFROST_DIR)
+	@$(STILLMARK_CLI) install --bifrost "$(BIFROST_DIR)" $(if $(CONFIG_PATH),--config "$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),--dry-run,)
 
 uninstall:
-	@go run installer.go -action=uninstall -bifrost-dir="$(BIFROST_DIR)" $(if $(CONFIG_PATH),-config-path="$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),-dry-run,)
+	$(REQUIRE_BIFROST_DIR)
+	@$(STILLMARK_CLI) uninstall --bifrost "$(BIFROST_DIR)" --clean-artifacts $(if $(CONFIG_PATH),--config "$(CONFIG_PATH)",) $(if $(filter 1,$(DRY_RUN)),--dry-run,)
 
 verify:
-	@go run installer.go -action=verify -bifrost-dir="$(BIFROST_DIR)"
+	$(REQUIRE_BIFROST_DIR)
+	@$(STILLMARK_CLI) verify --bifrost "$(BIFROST_DIR)"
 
 test-installer:
 	go run test_installer.go

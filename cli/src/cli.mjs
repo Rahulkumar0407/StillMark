@@ -5,6 +5,7 @@ import { getCliVersion, Logger, colorize } from './utils.mjs';
 import { runDoctor } from './doctor.mjs';
 import { runInstall } from './install.mjs';
 import { runGatewayVerification } from './verify.mjs';
+import { pluginPaths } from './builder.mjs';
 import { runUninstall } from './uninstall.mjs';
 
 function printHelp() {
@@ -19,7 +20,7 @@ ${colorize('bright', 'USAGE')}
 
 ${colorize('bright', 'COMMANDS')}
   ${colorize('green', 'doctor')}       Check environment, Go toolchain, and Bifrost compatibility
-  ${colorize('green', 'install')}      Compile native Bifrost with StillMark, configure, & verify
+  ${colorize('green', 'install')}      Add StillMark to a Bifrost checkout, build, configure, & verify
   ${colorize('green', 'verify')}       Run live end-to-end checks on an isolated gateway instance
   ${colorize('green', 'uninstall')}    Safely deactivate StillMark in configuration with rollback
 
@@ -27,11 +28,10 @@ ${colorize('bright', 'OPTIONS')}
   --bifrost <path>   Path to the Bifrost source checkout directory
   --config <path>    Path to Bifrost config.json for activation/deactivation
   --dry-run          Simulate actions without writing files or building
-  --legacy           Enable explicit legacy shared-object (.so) plugin mode
   --skip-verify      Skip the isolated gateway verification step during install
   --clean-artifacts  Remove staged build binaries during uninstall
   --port <port>      Preferred port for isolated verification (default: 8086)
-  --output-dir <dir> Custom directory for the built binary (default: <bifrost>/dist)
+  --plugin-src <dir> StillMark plugin source (default: bundled copy or repo plugins/stillmark)
   --verbose          Show detailed debug logs and build output
   --json             Output results as formatted JSON
   --help, -h         Show this help message
@@ -41,11 +41,11 @@ ${colorize('bright', 'EXAMPLES')}
   # 1. Run environment and checkout compatibility diagnostic:
   $ stillmark doctor --bifrost ./Bifrost --config ./Bifrost/config.json
 
-  # 2. Complete one-command native build, configuration, and verification:
+  # 2. Copy StillMark into Bifrost, build, activate in config.json, and verify:
   $ stillmark install --bifrost ./Bifrost --config ./Bifrost/config.json
 
   # 3. Verify an existing compiled gateway against an isolated mock provider:
-  $ stillmark verify --bifrost ./Bifrost/dist/bifrost-http
+  $ stillmark verify --bifrost ./Bifrost
 
   # 4. Safely deactivate StillMark:
   $ stillmark uninstall --config ./Bifrost/config.json
@@ -65,10 +65,9 @@ export function parseArgs(argv) {
     dryRun: false,
     verbose: false,
     json: false,
-    legacy: false,
     skipVerify: false,
     cleanArtifacts: false,
-    outputDir: '',
+    pluginSrc: '',
     port: 8086,
     help: false,
     version: false
@@ -88,8 +87,6 @@ export function parseArgs(argv) {
       options.verbose = true;
     } else if (arg === '--json') {
       options.json = true;
-    } else if (arg === '--legacy') {
-      options.legacy = true;
     } else if (arg === '--skip-verify') {
       options.skipVerify = true;
     } else if (arg === '--clean-artifacts') {
@@ -100,9 +97,9 @@ export function parseArgs(argv) {
     } else if (arg === '--config') {
       i++;
       options.configPath = args[i] || '';
-    } else if (arg === '--output-dir') {
+    } else if (arg === '--plugin-src') {
       i++;
-      options.outputDir = args[i] || '';
+      options.pluginSrc = args[i] || '';
     } else if (arg === '--port') {
       i++;
       options.port = parseInt(args[i], 10) || 8086;
@@ -174,9 +171,12 @@ export async function runCli(argv = process.argv) {
           logger.info(`Scenario: [${report.bifrost.scenario}] ${report.bifrost.scenarioName}`);
 
           if (report.bifrost.supported) {
-            logger.success('Native StillMark plugin registration verified in plugins.go and go.work');
+            const d = report.bifrost.details;
+            logger.success('Buildable Bifrost source checkout');
+            logger.info(`StillMark source in plugins/stillmark: ${d.stillmarkPresent ? 'present' : 'not yet (install will add it)'}`);
+            logger.info(`Built gateway + stillmark.so: ${d.gatewayBuilt && d.pluginBuilt ? 'present' : 'not yet (install will build them)'}`);
           } else {
-            logger.warn('Native StillMark installation not supported on this checkout:');
+            logger.warn('This path cannot be used for installation:');
             for (const r of report.bifrost.reasons || []) {
               logger.info(`  • ${r}`);
             }
@@ -199,15 +199,15 @@ export async function runCli(argv = process.argv) {
         }
 
         logger.section('Readiness Verdict');
-        if (report.canInstallNative) {
-          logger.success('READY: Bifrost checkout is compatible for one-command native installation.');
-        } else if (report.canInstallLegacy && options.legacy) {
-          logger.warn('LEGACY READY: Compatible for shared-object (.so) installation via --legacy.');
+        if (report.canInstall) {
+          logger.success('READY: run `stillmark install` with the same --bifrost path.');
+        } else if (!report.bifrost) {
+          logger.error('NOT READY: pass --bifrost <path to a Bifrost source checkout>.');
         } else {
           logger.error('NOT READY: Resolve missing prerequisites before proceeding with install.');
         }
 
-        return report.canInstallNative || (report.canInstallLegacy && options.legacy) ? 0 : 1;
+        return report.canInstall ? 0 : 1;
       }
 
       case 'install': {
@@ -216,19 +216,25 @@ export async function runCli(argv = process.argv) {
           logger.warn('[DRY-RUN MODE] Simulating steps without writing files or building.');
         }
 
-        const installResult = await runInstall(options);
+        const installResult = await runInstall(options, options.json ? undefined : (msg) => logger.info(`→ ${msg}`));
 
         if (options.json) {
           logger.outputJson(installResult);
           return 0;
         }
 
-        logger.section('Phase 1: Gateway Compilation (BUILT)');
-        logger.success(`Compiled binary ready at: ${installResult.built.binaryPath}`);
+        logger.section(installResult.dryRun ? 'Phase 1: Build (DRY RUN, nothing written)' : 'Phase 1: Build (BUILT)');
+        logger.info(`Plugin source: ${installResult.source.from} -> ${installResult.source.to} (${installResult.source.files} files)`);
+        if (installResult.source.removedStale.length) {
+          logger.info(`Removed stale plugin files: ${installResult.source.removedStale.join(', ')}`);
+        }
+        logger.info(`go.work: ${installResult.workspace.action}`);
+        logger.success(`Gateway: ${installResult.built.gatewayPath}`);
+        logger.success(`Plugin:  ${installResult.built.soPath}`);
 
         if (installResult.configured) {
           logger.section('Phase 2: Configuration Update (CONFIGURED)');
-          logger.success(`Updated configuration at: ${installResult.configured.configPath}`);
+          logger.success(`${installResult.dryRun ? 'Would update' : 'Updated'} configuration at: ${installResult.configured.configPath}`);
           logger.info(`Safety backup created at: ${installResult.configured.backupPath}`);
         } else {
           logger.section('Phase 2: Configuration (NOT REQUESTED)');
@@ -240,44 +246,45 @@ export async function runCli(argv = process.argv) {
           if (installResult.verified.success) {
             logger.success(`Verified active against isolated gateway on port ${installResult.verified.port}`);
             for (const chk of installResult.verified.checks) {
-              logger.info(`  • ${chk.name}: ${chk.passed ? colorize('green', 'PASS') : colorize('red', 'FAIL')}`);
+              logger.info(`  • ${chk.name}: ${chk.passed ? colorize('green', 'PASS') : colorize('red', 'FAIL')}${chk.findingCode ? ` (${chk.diagnosis}, ${chk.component}, ${chk.findingCode})` : ''}`);
             }
           } else {
             logger.error(`Verification checks failed: ${installResult.verified.error || 'Check response mismatch'}`);
+            for (const chk of installResult.verified.checks) {
+              logger.info(`  • ${chk.name}: ${chk.passed ? colorize('green', 'PASS') : colorize('red', 'FAIL')} (status ${chk.status}, diagnosis ${chk.diagnosis || 'none'})`);
+            }
+            logger.info('Re-run with --verbose to see gateway logs.');
+            return 1;
           }
         }
 
         logger.section('Summary');
-        logger.success('StillMark installation completed successfully.');
+        if (installResult.dryRun) {
+          logger.success('Dry run complete. Re-run without --dry-run to install.');
+        } else {
+          logger.success('StillMark installed.');
+          logger.info(`Start the gateway: ${installResult.built.gatewayPath} -app-dir <dir containing config.json>`);
+        }
         return 0;
       }
 
       case 'verify': {
         logger.header('StillMark Isolated Gateway Verification');
-        let targetBinary = options.bifrostPath;
-
-        if (!targetBinary) {
-          throw new Error('Please specify gateway binary or Bifrost checkout via --bifrost <path>');
+        if (!options.bifrostPath) {
+          throw new Error('Please specify the Bifrost checkout via --bifrost <path>');
         }
-
-        // If a directory was provided, look for dist/bifrost-http or tmp/bifrost-http
-        if (fs.existsSync(targetBinary) && fs.statSync(targetBinary).isDirectory()) {
-          const cand1 = path.join(targetBinary, 'dist', 'bifrost-http');
-          const cand2 = path.join(targetBinary, 'tmp', 'bifrost-http');
-          if (fs.existsSync(cand1)) {
-            targetBinary = cand1;
-          } else if (fs.existsSync(cand2)) {
-            targetBinary = cand2;
-          } else {
-            throw new Error(`Gateway binary not found in ${targetBinary}/dist/ or tmp/. Build first with 'stillmark install'.`);
+        const artifacts = pluginPaths(path.resolve(options.bifrostPath));
+        for (const p of [artifacts.gatewayPath, artifacts.soPath]) {
+          if (!fs.existsSync(p)) {
+            throw new Error(`Not found: ${p}. Build first with 'stillmark install --bifrost ${options.bifrostPath}'.`);
           }
         }
 
-        logger.info(`Testing gateway binary: ${targetBinary}`);
-        const verifyRes = await runGatewayVerification(targetBinary, {
+        logger.info(`Gateway: ${artifacts.gatewayPath}`);
+        logger.info(`Plugin:  ${artifacts.soPath}`);
+        const verifyRes = await runGatewayVerification(artifacts, {
           preferredPort: options.port,
-          verbose: options.verbose,
-          legacy: options.legacy
+          verbose: options.verbose
         });
 
         if (options.json) {
@@ -287,7 +294,7 @@ export async function runCli(argv = process.argv) {
 
         logger.section('Verification Results');
         for (const chk of verifyRes.checks) {
-          logger.info(`  • ${chk.name}: ${chk.passed ? colorize('green', 'PASS') : colorize('red', 'FAIL')}`);
+          logger.info(`  • ${chk.name}: ${chk.passed ? colorize('green', 'PASS') : colorize('red', 'FAIL')}${chk.findingCode ? ` (${chk.diagnosis}, ${chk.component}, ${chk.findingCode})` : ''}`);
         }
 
         if (verifyRes.success) {

@@ -8,6 +8,36 @@
 
 ---
 
+## Try It in 2 Minutes (for Judges)
+
+You need **Go 1.22+** (Go downloads the exact version Bifrost pins automatically), **Node 18+** and a C compiler (`xcode-select --install` on macOS, `gcc` on Linux). macOS or Linux only (Go plugins do not support Windows). No API keys.
+
+```bash
+git clone --depth 1 https://github.com/maximhq/bifrost.git
+npx stillmark install --bifrost ./bifrost
+```
+
+That one command adds StillMark to the stock Bifrost checkout, builds the gateway and `stillmark.so` (about 1–2 minutes the first time), then starts an isolated gateway on a spare port against a local mock provider and checks it live:
+
+```text
+  • Initial Turn Baseline Recording: PASS
+  • Structurally Stable Repeat Turn: PASS
+  • Changed System Prompt Flagged as Drift: PASS (confirmed_drift, system_prompt, SM008)
+  • Untracked Request Pass-through: PASS
+```
+
+Then see every diagnosis in action (mock provider, simulated token counts, about 1 minute):
+
+```bash
+cd bifrost/plugins/stillmark && make demo
+```
+
+It walks through a cache hit, a changed tool schema (`SM001`), a provider-side miss (`SM003`) and Bifrost auto-injecting Anthropic cache markers (`SM002`). See [the 7-step demo](#quickstart--7-step-reproducible-demo).
+
+Add `--config path/to/config.json` to the install command to also enable StillMark in your own Bifrost config (a backup is written first). To watch real prompt-cache reuse break and get diagnosed with a local model, see [Real Demo](#real-demo-one-command-free-offline).
+
+---
+
 ## The Real Operator Problem
 
 Modern LLM providers (Anthropic, OpenAI, DeepSeek, Google Gemini via OpenRouter) offer prompt-caching features that discount input token pricing by 50% to 90% when prefixes or tool definitions remain identical across requests.
@@ -124,70 +154,35 @@ When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 
 ## One-Command Installation & Management
 
-### Option A: Standalone npm CLI (`stillmark`)
+### Option A: npm CLI (`stillmark`)
 
-StillMark provides a standalone Node.js CLI tool under `cli/` for automated environment auditing, transactional plugin builds, atomic config management, and live gateway verification:
+Works on a stock Bifrost source checkout: it copies the plugin in, registers it in `go.work`, builds the gateway and `stillmark.so` from the same source (a Go plugin only loads into a host built from identical dependencies), optionally activates it in `config.json`, and verifies it live. From a clone of this repo, use `node cli/bin/stillmark.mjs` instead of `npx stillmark`.
 
 ```bash
-# 1. Environment & Bifrost compatibility audit
-node cli/bin/stillmark.mjs doctor --bifrost /path/to/Bifrost
+# 1. Check prerequisites and the Bifrost checkout
+npx stillmark doctor --bifrost /path/to/bifrost
 
-# 2. Build and register StillMark (with atomic backup & verification)
-node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json
+# 2. Preview, then install, activate and verify
+npx stillmark install --bifrost /path/to/bifrost --config /path/to/config.json --dry-run
+npx stillmark install --bifrost /path/to/bifrost --config /path/to/config.json
 
-# 3. Dry-run mode (preview without modifying files)
-node cli/bin/stillmark.mjs install --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json --dry-run
+# 3. Re-run the live checks on an isolated port against a mock provider
+npx stillmark verify --bifrost /path/to/bifrost
 
-# 4. Live-verify the built gateway on an isolated port against a mock provider
-node cli/bin/stillmark.mjs verify --bifrost /path/to/Bifrost
-
-# 5. Safe one-command uninstall and config rollback
-node cli/bin/stillmark.mjs uninstall --bifrost /path/to/Bifrost --config /path/to/Bifrost/config.json
+# 4. Deactivate (config backup first) and remove built artifacts
+npx stillmark uninstall --bifrost /path/to/bifrost --config /path/to/config.json --clean-artifacts
 ```
 
-### Option B: Go Installer & Makefile
+### Option B: Makefile
 
-StillMark includes an auditable, safe Go installer that verifies prerequisites, compiles the `.so` plugin against your exact Bifrost checkout, checks binary symbol compatibility, and safely activates the plugin in `config.json`.
+The Makefile targets in `plugins/stillmark` run the same CLI (Node 18+ required):
 
-### Prerequisites
-- **Operating System**: Linux (`amd64`, `arm64`) or macOS (`darwin/amd64`, `darwin/arm64`). *(Windows is not supported by Go's standard `plugin` package).*
-- **Go Toolchain**: Go 1.24+ (matching your Bifrost build compiler).
-- **CGO Compiler**: `gcc` or `clang` in PATH.
-
-### 1. Build and Install (Without Activation)
 ```bash
-make install BIFROST_DIR=/path/to/Bifrost
+cd plugins/stillmark
+make install   BIFROST_DIR=/path/to/bifrost [CONFIG_PATH=/path/to/config.json] [DRY_RUN=1]
+make verify    BIFROST_DIR=/path/to/bifrost
+make uninstall BIFROST_DIR=/path/to/bifrost [CONFIG_PATH=/path/to/config.json] [DRY_RUN=1]
 ```
-Compiles `stillmark.so`, places it at `<BIFROST_DIR>/plugins/stillmark/build/stillmark.so`, and verifies its symbols without altering any gateway configuration.
-
-### 2. One-Command Build, Install, and Automatic Activation
-```bash
-make install BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json
-```
-- Creates an automatic, timestamped backup (`config.json.bak.<timestamp>`).
-- Safely registers or updates the `stillmark` entry in `config.json`.
-- Idempotent: running multiple times never duplicates configuration entries.
-
-### 3. Dry-Run Mode
-Preview exactly what the installer would do without modifying any files:
-```bash
-make install BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json DRY_RUN=1
-```
-
-### 4. Verify Installed Plugin Binary
-Verify that an installed plugin `.so` is valid and exports all required Bifrost hook symbols:
-```bash
-make verify BIFROST_DIR=/path/to/Bifrost
-```
-
-### 5. Safe One-Command Uninstall
-```bash
-make uninstall BIFROST_DIR=/path/to/Bifrost CONFIG_PATH=/path/to/Bifrost/config.json
-```
-- Removes the compiled `stillmark.so` file and its empty directory.
-- Deactivates StillMark from `config.json` (with automatic backup).
-- **Preserves** all other Bifrost plugins and configuration.
-- Refuses dangerous or ambiguous paths (such as `/` or empty arguments).
 
 ---
 
@@ -284,8 +279,11 @@ Note: llama.cpp's prefix cache is a local stand-in for provider prompt caching. 
 
 Run the full 7-step demonstration locally with **zero paid APIs** using synthetic credentials and local mock backends:
 
+These targets run from the plugin copy inside a Bifrost checkout, which `stillmark install` creates:
+
 ```bash
-cd plugins/stillmark
+npx stillmark install --bifrost ./bifrost   # once
+cd bifrost/plugins/stillmark
 make demo
 ```
 
@@ -302,7 +300,7 @@ The automated demo walks through:
 
 ## Testing Commands
 
-From within the `plugins/stillmark` directory:
+Run these from the plugin copy inside a Bifrost checkout (`<bifrost>/plugins/stillmark`, created by `stillmark install`); the plugin's `go.mod` resolves Bifrost from `../../core`:
 
 ```bash
 # Run 43 unit and security regression tests

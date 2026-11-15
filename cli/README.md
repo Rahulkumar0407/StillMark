@@ -1,6 +1,6 @@
 # StillMark CLI (`stillmark`)
 
-> Professional one-command installer, verification engine, and diagnostics manager for **StillMark** — the native prompt-cache integrity plugin for Bifrost.
+> One-command installer, live verifier and diagnostics for **StillMark**, the prompt-cache integrity plugin for Bifrost.
 
 ---
 
@@ -8,55 +8,50 @@
 
 [Bifrost](https://github.com/maximhq/bifrost) is a high-performance AI gateway unifying 20+ LLM providers behind an OpenAI-compatible API.
 
-**StillMark** is an operator-focused native compile-time plugin for Bifrost that tracks prompt cache prefix stability, attributes cache-busting drift across multi-turn sessions, and surfaces actionable diagnostic findings (`CG001`-`CG007`) without storing sensitive user payloads.
+**StillMark** is an operator-focused Bifrost plugin for Bifrost that tracks prompt cache prefix stability, attributes cache-busting drift across multi-turn sessions, and surfaces actionable diagnostic findings (`CG001`-`CG007`) without storing sensitive user payloads.
 
-`stillmark` automates the end-to-end workflow: pre-flight checks, gateway compilation into a staging directory, atomic configuration updates, safe backups, and live isolated verification against an ephemeral mock provider.
+`stillmark` automates the whole workflow on a stock Bifrost source checkout: copy the plugin in, register it in `go.work`, build the gateway and `stillmark.so` from the same source, activate it in `config.json` (with backup), and verify it live on an isolated port against a local mock provider.
 
 ---
 
-## Compatibility Matrix
+## Requirements
 
-Because Go compiles into static machine binaries, native plugins must be compiled into the Bifrost gateway executable.
+- macOS or Linux (Go plugins do not support Windows)
+- Node.js 18+
+- Go 1.22+ (Go downloads the exact version Bifrost pins automatically)
+- A C compiler (`xcode-select --install` on macOS, `gcc` on Linux)
+- A Bifrost **source checkout**: `git clone --depth 1 https://github.com/maximhq/bifrost.git`
 
-| Scenario | Bifrost Deployment Mode | StillMark Integration Status | Supported by `stillmark` | Automated Actions |
-| :--- | :--- | :--- | :--- | :--- |
-| **A** | **Bifrost Source Checkout with StillMark** | Native StillMark source & registration present | **YES (Native Mode)** | Builds staging binary, atomically updates `config.json`, runs isolated verification |
-| **B** | **Clean Bifrost Source Checkout** | Stock upstream checkout without StillMark | **NO (Manual branch required)** | Explains why installation is blocked and instructs operator to checkout StillMark branch |
-| **C** | **Precompiled Binary / Docker** | Standalone precompiled binary or container image | **NO (Compiled Go limitation)** | Explains that native plugins cannot be injected into precompiled Go binaries |
-| **D** | **Legacy Prototype Checkout** | Legacy shared-object source (`plugins/cacheguard`) | **YES (via `--legacy`)** | Builds `.so` plugin via CGo `-buildmode=plugin` and updates config |
+Precompiled Bifrost binaries and Docker images are not supported: a Go plugin only loads into a gateway built from the same source and dependency versions, so the CLI builds both.
 
 ---
 
 ## Quick Start
 
-> **Running from a clone instead of npm?** Replace `npx stillmark` with `node cli/bin/stillmark.mjs` (from the repo root). No `npm install` is needed — the CLI has zero dependencies.
-
-### 1. Pre-flight Environment & Checkout Check
-Diagnose your system toolchain, Go workspace, and Bifrost source compatibility:
+> **Running from a clone instead of npm?** Replace `npx stillmark` with `node cli/bin/stillmark.mjs` (from the repo root). No `npm install` is needed; the CLI has zero dependencies.
 
 ```bash
-npx stillmark doctor --bifrost /path/to/Bifrost --config /path/to/config.json
+git clone --depth 1 https://github.com/maximhq/bifrost.git
+npx stillmark install --bifrost ./bifrost
 ```
 
-### 2. Complete One-Command Installation
-Compile native Bifrost with StillMark, configure `config.json`, and verify operation against an isolated test gateway:
+Expected result (about 1–2 minutes the first time):
 
-```bash
-npx stillmark install --bifrost /path/to/Bifrost --config /path/to/config.json
+```text
+  • Initial Turn Baseline Recording: PASS
+  • Structurally Stable Repeat Turn: PASS
+  • Changed System Prompt Flagged as Drift: PASS (confirmed_drift, system_prompt, SM008)
+  • Untracked Request Pass-through: PASS
 ```
 
-### 3. Verify an Existing Gateway
-Run live end-to-end checks on an isolated gateway instance without touching production:
+More:
 
 ```bash
-npx stillmark verify --bifrost /path/to/Bifrost/dist/bifrost-http
-```
-
-### 4. Safe Deactivation
-Deactivate StillMark in configuration with automatic backup and optional build artifact cleanup:
-
-```bash
-npx stillmark uninstall --config /path/to/config.json --clean-artifacts
+npx stillmark doctor  --bifrost ./bifrost                                  # check prerequisites
+npx stillmark install --bifrost ./bifrost --config ./config.json --dry-run # preview, writes nothing
+npx stillmark install --bifrost ./bifrost --config ./config.json           # install + activate
+npx stillmark verify  --bifrost ./bifrost                                  # re-run live checks
+npx stillmark uninstall --bifrost ./bifrost --config ./config.json --clean-artifacts
 ```
 
 ---
@@ -64,31 +59,29 @@ npx stillmark uninstall --config /path/to/config.json --clean-artifacts
 ## Command Reference
 
 ### Commands
-- `doctor`: Inspects Node.js version, Go toolchain, Bifrost source checkout, and config file.
-- `install`: Compiles native Bifrost gateway in a staging directory, updates `config.json`, and verifies against an isolated test instance.
-- `verify`: Launches an isolated Bifrost gateway on an ephemeral test port (e.g. 8086), runs a local mock provider, and verifies diagnostic headers (`X-Stillmark-Status`, `X-Stillmark-Diagnosis`).
-- `uninstall`: Transactionally deconfigures StillMark in `config.json` with safe timestamped backup, preserving all other plugins.
+- `doctor`: Checks Node.js, Go, and that `--bifrost` is a buildable Bifrost source checkout.
+- `install`: Copies the plugin into `<bifrost>/plugins/stillmark`, registers it in `go.work` (created if missing), builds `<bifrost>/dist/bifrost-http` and `<bifrost>/plugins/stillmark/build/stillmark.so`, activates it in `--config` if given, then verifies.
+- `verify`: Starts the built gateway with the plugin on an isolated port (default 8086, never 8080) against a local mock provider and checks the `X-Stillmark-*` headers, including that a changed system prompt is flagged as drift.
+- `uninstall`: Deactivates StillMark in `config.json` (backup first, other plugins untouched); with `--clean-artifacts`, removes the built gateway and `stillmark.so`.
 
 ### Options
-- `--bifrost <path>`: Path to the Bifrost source checkout directory.
-- `--config <path>`: Path to Bifrost `config.json` for activation/deactivation.
-- `--dry-run`: Preview all operations without modifying files or compiling binaries.
-- `--legacy`: Enable explicit legacy shared-object (`.so`) plugin compilation mode.
-- `--output-dir <path>`: Custom staging directory for the compiled gateway (default: `<bifrost>/dist`).
-- `--port <port>`: Preferred port for isolated verification testing (default: 8086, never 8080).
-- `--skip-verify`: Skip the isolated gateway verification step during installation.
-- `--clean-artifacts`: Remove compiled staging binaries during uninstallation.
-- `--verbose`: Enable detailed debug logging and compiler output.
-- `--json`: Output machine-readable JSON for CI/CD automation.
-- `--help, -h`: Show command help.
-- `--version, -v`: Show CLI version.
+- `--bifrost <path>`: Bifrost source checkout.
+- `--config <path>`: Bifrost `config.json` to activate/deactivate StillMark in.
+- `--plugin-src <path>`: StillMark plugin source (default: this repo's `plugins/stillmark`, or the copy bundled in the npm package).
+- `--dry-run`: Show what would happen without writing files or building.
+- `--port <port>`: Preferred port for verification (default 8086).
+- `--skip-verify`: Skip live verification during install.
+- `--clean-artifacts`: Remove built binaries during uninstall.
+- `--verbose`: Show gateway logs and build output.
+- `--json`: Machine-readable output.
+- `--help, -h` / `--version, -v`
 
 ---
 
 ## Security Guarantees
 
 1. **No Untrusted Shell Execution**: All external commands (`go`, `git`) use `child_process.execFile` with direct argument arrays. No shell interpolation or `sh -c` is ever used.
-2. **Never Modifies Running Binaries**: Native compilation outputs to a staging directory (`<bifrost>/dist/`) using temporary files and atomic rename.
+2. **Never Modifies Running Binaries**: Builds write to a temporary file and are atomically renamed into place.
 3. **Atomic Configuration Updates**: `config.json` updates are written to `.config.<pid>.<time>.tmp` in the same directory, verified as valid JSON, fsynced to disk, and atomically renamed.
 4. **Collision-Safe Backups**: Backups use `<config>.bak.<timestamp>_<attempt>` and preserve original file permissions (capped at `0o600`).
 5. **Symlink Escape & Path Traversal Prevention**: All file paths are strictly checked to ensure they do not traverse outside their base directories or operate through symbolic links.

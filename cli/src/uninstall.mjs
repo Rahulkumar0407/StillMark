@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { deactivateStillmarkConfig } from './config.mjs';
 import { validatePathWithin } from './security.mjs';
+import { pluginPaths } from './builder.mjs';
 
 /**
  * Runs the uninstall workflow.
@@ -29,10 +30,9 @@ export async function runUninstall(options = {}) {
     const absBifrost = path.resolve(bifrostPath);
     validatePathWithin(path.dirname(absBifrost), absBifrost);
 
-    const stagedBin = path.join(absBifrost, 'dist', 'bifrost-http');
-    const legacySO = path.join(absBifrost, 'plugins', 'cacheguard', 'build', 'cacheguard.so');
+    const { gatewayPath, soPath } = pluginPaths(absBifrost);
 
-    for (const artifact of [stagedBin, legacySO]) {
+    for (const artifact of [gatewayPath, soPath]) {
       if (fs.existsSync(artifact)) {
         validatePathWithin(absBifrost, artifact);
         if (dryRun) {

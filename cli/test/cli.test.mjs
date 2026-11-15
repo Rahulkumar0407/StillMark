@@ -8,7 +8,6 @@ test('parseArgs: parses default flags correctly', () => {
   assert.equal(opts.dryRun, false);
   assert.equal(opts.verbose, false);
   assert.equal(opts.json, false);
-  assert.equal(opts.legacy, false);
   assert.equal(opts.port, 8086);
 });
 

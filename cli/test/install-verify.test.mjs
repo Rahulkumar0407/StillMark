@@ -19,66 +19,42 @@ test('mock-provider: starts and responds on ephemeral port', async () => {
   }
 });
 
+function scaffoldBifrost(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.mkdirSync(path.join(dir, 'core'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
+  fs.mkdirSync(path.join(dir, 'transports', 'bifrost-http'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'plugins'), { recursive: true });
+  return dir;
+}
+
 test('install: dry-run mode leaves filesystem untouched', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-dry-'));
+  const tmpDir = scaffoldBifrost('stillmark-dry-');
   try {
-    // Scaffold minimal compatible source
-    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports ./plugins/stillmark )\n');
-    fs.mkdirSync(path.join(tmpDir, 'core'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
-    fs.mkdirSync(path.join(tmpDir, 'transports', 'bifrost-http', 'server'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, 'transports', 'bifrost-http', 'server', 'plugins.go'),
-      'package server\nimport "github.com/maximhq/bifrost/plugins/stillmark"\nfunc load() { _ = stillmark.PluginName }\n'
-    );
-    fs.mkdirSync(path.join(tmpDir, 'plugins', 'stillmark'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'plugins', 'stillmark', 'stillmark.go'), 'package stillmark\n');
-
     const configPath = path.join(tmpDir, 'config.json');
-    const initialConfig = { client: { port: 8086 }, plugins: [] };
-    fs.writeFileSync(configPath, JSON.stringify(initialConfig), { mode: 0o600 });
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: [] }), { mode: 0o600 });
 
-    const result = await runInstall({
-      bifrostPath: tmpDir,
-      configPath,
-      dryRun: true,
-      skipVerify: true
-    });
+    const result = await runInstall({ bifrostPath: tmpDir, configPath, dryRun: true, skipVerify: true });
 
     assert.equal(result.built.dryRun, true);
     assert.equal(result.configured.dryRun, true);
+    assert.ok(result.source.files > 0, 'plugin source files should be found');
+    assert.equal(result.configured.entry.type, 'shared_object');
 
-    // Verify config on disk was NOT modified during dry-run
-    const diskContent = fs.readFileSync(configPath, 'utf8');
-    assert.equal(JSON.parse(diskContent).plugins.length, 0);
-
-    // Verify no backup file created
-    const files = fs.readdirSync(tmpDir);
-    const backupFiles = files.filter((f) => f.includes('.bak.'));
-    assert.equal(backupFiles.length, 0);
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugins.length, 0);
+    assert.equal(fs.existsSync(path.join(tmpDir, 'plugins', 'stillmark')), false, 'no plugin copy in dry-run');
+    assert.equal(fs.existsSync(path.join(tmpDir, 'go.work')), false, 'no go.work in dry-run');
+    assert.equal(fs.readdirSync(tmpDir).filter((f) => f.includes('.bak.')).length, 0);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
-test('install: blocks clean Bifrost source (Scenario B) with diagnostic error', async () => {
+test('install: blocks a directory that is not a Bifrost source checkout', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stillmark-block-'));
   try {
-    fs.writeFileSync(path.join(tmpDir, 'go.work'), 'go 1.27.3\nuse ( ./core ./transports )\n');
-    fs.mkdirSync(path.join(tmpDir, 'core'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'core', 'go.mod'), 'module github.com/maximhq/bifrost/core\n');
-    fs.mkdirSync(path.join(tmpDir, 'transports', 'bifrost-http', 'server'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, 'transports', 'bifrost-http', 'server', 'plugins.go'),
-      'package server\nfunc load() {}\n'
-    );
-
-    await assert.rejects(async () => {
-      await runInstall({
-        bifrostPath: tmpDir,
-        skipVerify: true
-      });
-    }, /Installation Blocked \[Scenario B/);
+    fs.writeFileSync(path.join(tmpDir, 'bifrost-http'), 'binary');
+    await assert.rejects(runInstall({ bifrostPath: tmpDir, skipVerify: true }), /Installation Blocked \[Scenario C/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

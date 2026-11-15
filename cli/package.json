@@ -1,6 +1,6 @@
 {
   "name": "stillmark",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Installer, verification engine, and diagnostics manager for StillMark prompt-cache integrity plugin in Bifrost",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "plugin",
     "README.md",
     "LICENSE"
   ],
@@ -16,7 +17,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepack": "node scripts/bundle-plugin.mjs"
   },
   "keywords": [
     "bifrost",
