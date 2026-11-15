@@ -14,7 +14,7 @@ ${colorize('bright', 'StillMark CLI')} (v${v})
 One-command installer, verification engine, and diagnostics manager for StillMark in Bifrost.
 
 ${colorize('bright', 'USAGE')}
-  $ npx @stillmark/cli <command> [options]
+  $ npx stillmark <command> [options]
   $ stillmark <command> [options]
 
 ${colorize('bright', 'COMMANDS')}

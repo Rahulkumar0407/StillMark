@@ -1,4 +1,4 @@
-# StillMark CLI (`@stillmark/cli`)
+# StillMark CLI (`stillmark`)
 
 > Professional one-command installer, verification engine, and diagnostics manager for **StillMark** — the native prompt-cache integrity plugin for Bifrost.
 
@@ -10,7 +10,7 @@
 
 **StillMark** is an operator-focused native compile-time plugin for Bifrost that tracks prompt cache prefix stability, attributes cache-busting drift across multi-turn sessions, and surfaces actionable diagnostic findings (`CG001`-`CG007`) without storing sensitive user payloads.
 
-`@stillmark/cli` automates the end-to-end workflow: pre-flight checks, gateway compilation into a staging directory, atomic configuration updates, safe backups, and live isolated verification against an ephemeral mock provider.
+`stillmark` automates the end-to-end workflow: pre-flight checks, gateway compilation into a staging directory, atomic configuration updates, safe backups, and live isolated verification against an ephemeral mock provider.
 
 ---
 
@@ -18,7 +18,7 @@
 
 Because Go compiles into static machine binaries, native plugins must be compiled into the Bifrost gateway executable.
 
-| Scenario | Bifrost Deployment Mode | StillMark Integration Status | Supported by `@stillmark/cli` | Automated Actions |
+| Scenario | Bifrost Deployment Mode | StillMark Integration Status | Supported by `stillmark` | Automated Actions |
 | :--- | :--- | :--- | :--- | :--- |
 | **A** | **Bifrost Source Checkout with StillMark** | Native StillMark source & registration present | **YES (Native Mode)** | Builds staging binary, atomically updates `config.json`, runs isolated verification |
 | **B** | **Clean Bifrost Source Checkout** | Stock upstream checkout without StillMark | **NO (Manual branch required)** | Explains why installation is blocked and instructs operator to checkout StillMark branch |
@@ -29,34 +29,34 @@ Because Go compiles into static machine binaries, native plugins must be compile
 
 ## Quick Start
 
-> **Running from a clone instead of npm?** Replace `npx @stillmark/cli` with `node cli/bin/stillmark.mjs` (from the repo root). No `npm install` is needed — the CLI has zero dependencies.
+> **Running from a clone instead of npm?** Replace `npx stillmark` with `node cli/bin/stillmark.mjs` (from the repo root). No `npm install` is needed — the CLI has zero dependencies.
 
 ### 1. Pre-flight Environment & Checkout Check
 Diagnose your system toolchain, Go workspace, and Bifrost source compatibility:
 
 ```bash
-npx @stillmark/cli doctor --bifrost /path/to/Bifrost --config /path/to/config.json
+npx stillmark doctor --bifrost /path/to/Bifrost --config /path/to/config.json
 ```
 
 ### 2. Complete One-Command Installation
 Compile native Bifrost with StillMark, configure `config.json`, and verify operation against an isolated test gateway:
 
 ```bash
-npx @stillmark/cli install --bifrost /path/to/Bifrost --config /path/to/config.json
+npx stillmark install --bifrost /path/to/Bifrost --config /path/to/config.json
 ```
 
 ### 3. Verify an Existing Gateway
 Run live end-to-end checks on an isolated gateway instance without touching production:
 
 ```bash
-npx @stillmark/cli verify --bifrost /path/to/Bifrost/dist/bifrost-http
+npx stillmark verify --bifrost /path/to/Bifrost/dist/bifrost-http
 ```
 
 ### 4. Safe Deactivation
 Deactivate StillMark in configuration with automatic backup and optional build artifact cleanup:
 
 ```bash
-npx @stillmark/cli uninstall --config /path/to/config.json --clean-artifacts
+npx stillmark uninstall --config /path/to/config.json --clean-artifacts
 ```
 
 ---

@@ -124,7 +124,7 @@ When active, StillMark adds non-sensitive diagnostic headers to HTTP responses:
 
 ## One-Command Installation & Management
 
-### Option A: Standalone npm CLI (`@stillmark/cli`)
+### Option A: Standalone npm CLI (`stillmark`)
 
 StillMark provides a standalone Node.js CLI tool under `cli/` for automated environment auditing, transactional plugin builds, atomic config management, and live gateway verification:
 
